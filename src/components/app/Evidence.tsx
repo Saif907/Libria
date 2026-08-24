@@ -46,7 +46,7 @@ export function ScopeSelector({
 }: {
   scope: Scope;
   onChange: (s: Scope) => void;
-  available?: Scope[];
+  available?: Scope[] | undefined;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-1">
@@ -75,7 +75,7 @@ export function ContextPreview({
 }: {
   scope: Scope;
   detail: string;
-  passage?: string;
+  passage?: string | undefined;
 }) {
   return (
     <div className="border-l-2 border-accent bg-surface px-3 py-2.5">
@@ -101,7 +101,7 @@ export function CitationCard({
   index,
 }: {
   citation: Citation;
-  index?: number;
+  index?: number | undefined;
 }) {
   const book = getBook(citation.bookId);
   if (!book) return null;

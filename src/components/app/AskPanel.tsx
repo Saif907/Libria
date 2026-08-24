@@ -19,7 +19,7 @@ export function AskComposer({
   scope: Scope;
   onScope: (s: Scope) => void;
   onAsk: (q: string) => void;
-  availableScopes?: Scope[];
+  availableScopes?: Scope[] | undefined;
 }) {
   const [value, setValue] = useState("");
   return (
@@ -75,10 +75,10 @@ export function AskBody({
   scope: Scope;
   setScope: (s: Scope) => void;
   contextDetail: string;
-  contextPassage?: string;
+  contextPassage?: string | undefined;
   answer: Answer | null;
   setAnswer: (a: Answer | null) => void;
-  availableScopes?: Scope[];
+  availableScopes?: Scope[] | undefined;
 }) {
   const ask = (q: string) => setAnswer(answerFor(scope, q));
 
@@ -172,8 +172,8 @@ export function AskPanel({
   open: boolean;
   onClose: () => void;
   contextDetail: string;
-  contextPassage?: string;
-  initialScope?: Scope;
+  contextPassage?: string | undefined;
+  initialScope?: Scope | undefined;
 }) {
   const [scope, setScope] = useState<Scope>(initialScope);
   const [answer, setAnswer] = useState<Answer | null>(null);
