@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AudioRouteImport } from './routes/audio'
 import { Route as ContinueRouteImport } from './routes/continue'
+import { Route as HighlightsRouteImport } from './routes/highlights'
 import { Route as KnowledgeRouteImport } from './routes/knowledge'
 import { Route as BookBookIdRouteImport } from './routes/book.$bookId'
 import { Route as ReadBookIdRouteImport } from './routes/read.$bookId'
@@ -29,6 +30,11 @@ const AudioRoute = AudioRouteImport.update({
 const ContinueRoute = ContinueRouteImport.update({
   id: '/continue',
   path: '/continue',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HighlightsRoute = HighlightsRouteImport.update({
+  id: '/highlights',
+  path: '/highlights',
   getParentRoute: () => rootRouteImport,
 } as any)
 const KnowledgeRoute = KnowledgeRouteImport.update({
@@ -51,6 +57,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/audio': typeof AudioRoute
   '/continue': typeof ContinueRoute
+  '/highlights': typeof HighlightsRoute
   '/knowledge': typeof KnowledgeRoute
   '/book/$bookId': typeof BookBookIdRoute
   '/read/$bookId': typeof ReadBookIdRoute
@@ -59,6 +66,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/audio': typeof AudioRoute
   '/continue': typeof ContinueRoute
+  '/highlights': typeof HighlightsRoute
   '/knowledge': typeof KnowledgeRoute
   '/book/$bookId': typeof BookBookIdRoute
   '/read/$bookId': typeof ReadBookIdRoute
@@ -68,6 +76,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/audio': typeof AudioRoute
   '/continue': typeof ContinueRoute
+  '/highlights': typeof HighlightsRoute
   '/knowledge': typeof KnowledgeRoute
   '/book/$bookId': typeof BookBookIdRoute
   '/read/$bookId': typeof ReadBookIdRoute
@@ -78,6 +87,7 @@ export interface FileRouteTypes {
     | '/'
     | '/audio'
     | '/continue'
+    | '/highlights'
     | '/knowledge'
     | '/book/$bookId'
     | '/read/$bookId'
@@ -86,6 +96,7 @@ export interface FileRouteTypes {
     | '/'
     | '/audio'
     | '/continue'
+    | '/highlights'
     | '/knowledge'
     | '/book/$bookId'
     | '/read/$bookId'
@@ -94,6 +105,7 @@ export interface FileRouteTypes {
     | '/'
     | '/audio'
     | '/continue'
+    | '/highlights'
     | '/knowledge'
     | '/book/$bookId'
     | '/read/$bookId'
@@ -103,6 +115,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AudioRoute: typeof AudioRoute
   ContinueRoute: typeof ContinueRoute
+  HighlightsRoute: typeof HighlightsRoute
   KnowledgeRoute: typeof KnowledgeRoute
   BookBookIdRoute: typeof BookBookIdRoute
   ReadBookIdRoute: typeof ReadBookIdRoute
@@ -129,6 +142,13 @@ declare module '@tanstack/react-router' {
       path: '/continue'
       fullPath: '/continue'
       preLoaderRoute: typeof ContinueRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/highlights': {
+      id: '/highlights'
+      path: '/highlights'
+      fullPath: '/highlights'
+      preLoaderRoute: typeof HighlightsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/knowledge': {
@@ -159,6 +179,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AudioRoute: AudioRoute,
   ContinueRoute: ContinueRoute,
+  HighlightsRoute: HighlightsRoute,
   KnowledgeRoute: KnowledgeRoute,
   BookBookIdRoute: BookBookIdRoute,
   ReadBookIdRoute: ReadBookIdRoute,
