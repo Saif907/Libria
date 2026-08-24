@@ -15,9 +15,10 @@ import { books, continueReading, type Book } from "@/lib/library-data";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({
-  validateSearch: (s: Record<string, unknown>) => ({
-    collection: typeof s.collection === "string" ? s.collection : undefined,
-  }),
+  validateSearch: (s: Record<string, unknown>): { collection?: string } =>
+    typeof s["collection"] === "string"
+      ? { collection: s["collection"] }
+      : {},
   head: () => ({
     meta: [
       { title: "Library — Marginalia" },
