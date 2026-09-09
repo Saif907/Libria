@@ -1,4 +1,4 @@
-import { createFileRoute, Link, notFound, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, notFound, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   ArrowLeft,
@@ -31,6 +31,8 @@ export const Route = createFileRoute("/read/$bookId")({
     const index = typeof raw === "number" ? raw : Number(raw);
     return Number.isInteger(index) && index >= 0 ? { chapter: index } : {};
   },
+  staleTime: 60_000,
+  gcTime: 15 * 60_000,
   loaderDeps: ({ search }) => ({ chapter: search.chapter ?? 0 }),
   loader: async ({ params, deps }) => {
     // Both calls share the server's parsed-book cache, so this is one download
@@ -133,11 +135,24 @@ function Reader() {
   const total = chapters.length;
   const fraction = total > 0 ? (index + 1) / total : 0;
 
+  const router = useRouter();
+
   // Opening a chapter is what marks it read; there is no scroll tracking behind
   // this, so the position is honest about being chapter-level.
   useEffect(() => {
     save(index, total);
   }, [save, index, total]);
+
+  // Preload the next chapter in the background so clicking "Next" paints immediately
+  useEffect(() => {
+    if (index + 1 < total) {
+      void router.preloadRoute({
+        to: "/read/$bookId",
+        params: { bookId: book.id },
+        search: { chapter: index + 1 },
+      });
+    }
+  }, [index, total, book.id, router]);
 
   // Real text selection, replacing the old click-a-sentence stand-in. Only
   // selections inside the article body open the toolbar.

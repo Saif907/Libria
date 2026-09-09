@@ -5,6 +5,8 @@ import { Button, IconButton } from "@/components/app/primitives";
 import { getBookDetail, getPdfUrl, hasMarkdown } from "@/lib/books";
 
 export const Route = createFileRoute("/pdf/$bookId")({
+  staleTime: 60_000,
+  gcTime: 15 * 60_000,
   loader: async ({ params }) => {
     // Both resolve the book from the same cached listing, so this is two
     // in-process lookups plus one signature — no object is downloaded here.

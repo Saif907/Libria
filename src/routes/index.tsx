@@ -33,6 +33,8 @@ export const Route = createFileRoute("/")({
     typeof s["collection"] === "string"
       ? { collection: s["collection"] }
       : {},
+  staleTime: 60_000,
+  gcTime: 15 * 60_000,
   loader: () => getLibrary(),
   head: () => ({
     meta: [

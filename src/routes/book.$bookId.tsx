@@ -22,6 +22,8 @@ import { highlights, notes } from "@/lib/library-data";
 import { lastOpenedLabel, useProgress } from "@/lib/reading-progress";
 
 export const Route = createFileRoute("/book/$bookId")({
+  staleTime: 60_000,
+  gcTime: 15 * 60_000,
   loader: async ({ params }) => {
     const detail = await getBookDetail({ data: { bookId: params.bookId } });
     if (!detail) throw notFound();

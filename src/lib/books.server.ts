@@ -1,8 +1,8 @@
 /**
- * Turns bucket objects into the book domain the UI renders.
+ * Turns Supabase bucket objects into the book domain the UI renders.
  *
  * SERVER ONLY — imported dynamically from inside the server-function handlers in
- * books.ts, so neither this module nor gcs.server.ts enters the client bundle.
+ * books.ts, so neither this module nor supabase-storage.server.ts enters the client bundle.
  */
 
 import {
@@ -15,10 +15,13 @@ import {
   type ChapterContent,
   type LibraryBook,
 } from "./books";
-import { downloadText, gcsConfig, listObjects, signedObjectUrl, type GcsObject } from "./gcs.server";
-
-/** Same filename the backend's GCSStreamer reads its metadata from. */
-const MANIFEST_FILENAME = "book_categories.json";
+import {
+  downloadText,
+  loadCatalog,
+  signedObjectUrl,
+  supabaseStorageConfig,
+  type CatalogBook,
+} from "./supabase-storage.server";
 
 /** Long enough that browsing costs nothing, short enough to notice an upload. */
 const LIBRARY_TTL_MS = 5 * 60 * 1000;
@@ -28,8 +31,7 @@ const PARSED_BOOK_CACHE_SIZE = 3;
 
 /**
  * Rough bytes-per-word for markdown prose (≈5 letters, a space, plus syntax).
- * Only used for the library listing, where downloading 17 books to count words
- * would cost far more than the estimate is worth.
+ * Only used for the library listing reading-time estimation.
  */
 const BYTES_PER_WORD = 6.5;
 
@@ -37,121 +39,38 @@ const BYTES_PER_WORD = 6.5;
 const MAX_CHAPTER_WORDS = 6000;
 const TARGET_SPLIT_WORDS = 3000;
 
-/* ---------- Keys ---------- */
-
-function basename(objectName: string): string {
-  return objectName.slice(objectName.lastIndexOf("/") + 1);
-}
-
-/**
- * Mirrors GCSStreamer._normalize_key (`Path(key).stem.lower()`) so a book has
- * the same id on the frontend and in the vector store, and so the manifest's
- * `<name>.pdf` keys join to the bucket's `<name>.md` objects.
- */
-function normalizeKey(objectName: string): string {
-  const base = basename(objectName);
-  const dot = base.lastIndexOf(".");
-  return (dot > 0 ? base.slice(0, dot) : base).toLowerCase();
-}
-
-/* ---------- Manifest ---------- */
-
-type ManifestEntry = {
-  title?: string;
-  author?: string;
-  published_date?: string;
-  format?: string;
-  categories?: string[];
-  description?: string;
-};
-
-async function loadManifest(prefix: string): Promise<Map<string, ManifestEntry>> {
-  const lookup = new Map<string, ManifestEntry>();
-
-  let raw: string | null;
-  try {
-    raw = await downloadText(`${prefix}/${MANIFEST_FILENAME}`);
-  } catch (error) {
-    // Metadata is an enhancement, not a requirement — filenames alone are
-    // enough to show a library, so degrade instead of failing the page.
-    console.warn(`Could not read ${MANIFEST_FILENAME}; falling back to filenames.`, error);
-    return lookup;
-  }
-  if (raw === null) return lookup;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    console.warn(`${MANIFEST_FILENAME} is not valid JSON; falling back to filenames.`, error);
-    return lookup;
-  }
-  if (typeof parsed !== "object" || parsed === null) return lookup;
-
-  // Register under both the raw key and its normalized stem, so `.pdf` keys in
-  // the manifest resolve for `.md` objects in the bucket.
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof value !== "object" || value === null) continue;
-    const entry = value as ManifestEntry;
-    lookup.set(key, entry);
-    lookup.set(normalizeKey(key), entry);
-  }
-  return lookup;
-}
+/* ---------- Helpers ---------- */
 
 function parseYear(publishedDate: string | undefined): number {
   const match = publishedDate?.match(/\d{4}/);
   return match ? Number(match[0]) : 0;
 }
 
-/**
- * The two objects that can back one book. Either may be absent: some books were
- * only ever converted to markdown, some only uploaded as PDF, most have both.
- */
-type BookSources = { markdown?: GcsObject; pdf?: GcsObject };
-
-function newerOf(a: GcsObject | undefined, b: GcsObject | undefined): string {
-  const left = a?.updated ?? "";
-  const right = b?.updated ?? "";
-  return left > right ? left : right;
-}
-
-function toLibraryBook(
-  id: string,
-  sources: BookSources,
-  manifest: Map<string, ManifestEntry>,
-): LibraryBook {
-  const primary = sources.markdown ?? sources.pdf;
-  const entry =
-    manifest.get(id) ??
-    (primary ? manifest.get(basename(primary.name)) : undefined);
-  const fallback = titleAndAuthorFromId(id);
-
-  const categories = (entry?.categories ?? []).filter(
+function catalogBookToLibraryBook(book: CatalogBook): LibraryBook {
+  const fallback = titleAndAuthorFromId(book.id);
+  const categories = (book.categories ?? []).filter(
     (category): category is string => typeof category === "string" && category !== "",
   );
   const firstCategory = categories[0];
 
-  // Only the markdown's size predicts reading time; a PDF's bytes are mostly
-  // fonts and images, so guessing from them would be noise dressed as a number.
-  const estimatedMinutes = sources.markdown
-    ? Math.round(sources.markdown.sizeBytes / BYTES_PER_WORD / WORDS_PER_MINUTE)
+  const estimatedMinutes = book.markdown_size_bytes
+    ? Math.round(book.markdown_size_bytes / BYTES_PER_WORD / WORDS_PER_MINUTE)
     : 0;
 
   return {
-    id,
-    markdownObject: sources.markdown?.name ?? null,
-    pdfObject: sources.pdf?.name ?? null,
-    title: entry?.title?.trim() || fallback.title,
-    author: entry?.author?.trim() || fallback.author,
-    year: parseYear(entry?.published_date),
+    id: book.id,
+    markdownObject: book.markdown_path,
+    pdfObject: book.pdf_path,
+    title: book.title?.trim() || fallback.title,
+    author: book.author?.trim() || fallback.author,
+    year: parseYear(book.published_date),
     collection: firstCategory ? categoryLabel(firstCategory) : "Uncategorised",
     categories,
-    description: entry?.description?.trim() ?? "",
-    cover: coverFor(id),
-    sizeBytes: primary?.sizeBytes ?? 0,
+    description: book.description?.trim() ?? "",
+    cover: coverFor(book.id),
+    sizeBytes: book.markdown_size_bytes || book.pdf_size_bytes || 0,
     estimatedMinutes,
-    updated: newerOf(sources.markdown, sources.pdf),
+    updated: book.updated_at ?? "",
   };
 }
 
@@ -175,51 +94,23 @@ export async function loadLibrary(): Promise<LibraryBook[]> {
 }
 
 /**
- * All three requests go out together. Discovering the PDFs therefore costs no
- * extra wall-clock time over listing the markdown alone — it is the same round
- * trip, in parallel.
+ * Loads the library instantly in one single call via the master catalog.json file.
  */
 async function fetchLibrary(): Promise<LibraryBook[]> {
-  const { prefix, pdfPrefix } = gcsConfig();
+  const { ownerUid } = supabaseStorageConfig();
+  const catalog = await loadCatalog(ownerUid);
 
-  const [markdownObjects, pdfObjects, manifest] = await Promise.all([
-    listObjects(`${prefix}/`),
-    // A missing or unreadable `ebooks/` prefix must not take the library down
-    // with it: the PDFs are an alternative view, not the library itself.
-    listObjects(`${pdfPrefix}/`).catch((error: unknown) => {
-      console.warn(`Could not list ${pdfPrefix}/; PDF view will be unavailable.`, error);
-      return [] as GcsObject[];
-    }),
-    loadManifest(prefix),
-  ]);
-
-  // Keyed by normalized stem, so `ebooks/atomic_habits.pdf` and
-  // `outputs_md/.../atomic_habits.md` collapse into one book with two formats.
-  const sources = new Map<string, BookSources>();
-
-  const register = (object: GcsObject, format: "markdown" | "pdf") => {
-    const id = normalizeKey(object.name);
-    if (id === "") return;
-    const existing = sources.get(id) ?? {};
-    existing[format] = object;
-    sources.set(id, existing);
-  };
-
-  for (const object of markdownObjects) {
-    if (object.name.toLowerCase().endsWith(".md")) register(object, "markdown");
-  }
-  for (const object of pdfObjects) {
-    if (object.name.toLowerCase().endsWith(".pdf")) register(object, "pdf");
+  if (!catalog || !Array.isArray(catalog.books)) {
+    console.warn("No catalog.json found or catalog.books is empty.");
+    return [];
   }
 
-  return [...sources.entries()]
-    .map(([id, formats]) => toLibraryBook(id, formats, manifest))
+  return catalog.books
+    .map(catalogBookToLibraryBook)
     .sort((a, b) => a.title.localeCompare(b.title));
 }
 
 async function findBook(bookId: string): Promise<LibraryBook | undefined> {
-  // Resolving through the listing means a client-supplied id never becomes part
-  // of an object path — traversal outside the prefix is structurally impossible.
   return (await loadLibrary()).find((book) => book.id === bookId);
 }
 
@@ -238,7 +129,7 @@ const parsedInFlight = new Map<string, Promise<ParsedBook | null>>();
 async function loadParsedBook(book: LibraryBook): Promise<ParsedBook | null> {
   const cached = parsedBooks.get(book.id);
   if (cached) {
-    // Refresh LRU position.
+    // Refresh LRU position
     parsedBooks.delete(book.id);
     parsedBooks.set(book.id, cached);
     return cached;
@@ -271,8 +162,7 @@ export async function loadBookDetail(bookId: string): Promise<BookDetail | null>
   const book = await findBook(bookId);
   if (!book) return null;
 
-  // A PDF-only book has no chapters to parse, and no megabyte to download for
-  // the detail page — it renders straight from the listing.
+  // A PDF-only book has no chapters to parse — renders straight from metadata
   if (book.markdownObject === null) return { book, chapters: [], totalWords: 0 };
 
   const parsed = await loadParsedBook(book);
@@ -288,11 +178,6 @@ export async function loadPdfUrl(bookId: string): Promise<string | null> {
   return signedObjectUrl(book.pdfObject);
 }
 
-/**
- * `index` is clamped rather than rejected: a stored reading position can outlive
- * a re-conversion that changed the chapter count, and the last chapter is a far
- * better answer there than a 404.
- */
 export async function loadChapterContent(
   bookId: string,
   index: number,
@@ -313,11 +198,7 @@ export async function loadChapterContent(
 /* ---------- Chapter splitting ---------- */
 
 const HEADING = /^(#{1,3})\s+(.*?)\s*#*$/;
-
-/** A level needs this many headings before it is treated as the chapter level. */
 const MIN_HEADINGS_FOR_LEVEL = 3;
-
-/** Below this, leading text before the first heading is not worth its own entry. */
 const MIN_FRONT_MATTER_WORDS = 50;
 
 function countWords(text: string): number {
@@ -325,11 +206,6 @@ function countWords(text: string): number {
   return trimmed === "" ? 0 : trimmed.split(/\s+/).length;
 }
 
-/**
- * Docling emits ATX headings, but how many levels it finds varies per PDF. Pick
- * the shallowest level that actually divides the book, and fall back to a single
- * chapter for files with no headings at all.
- */
 function splitChapters(rawMarkdown: string): ParsedBook {
   const lines = rawMarkdown.replace(/\r\n?/g, "\n").split("\n");
 
@@ -374,8 +250,6 @@ function splitChapters(rawMarkdown: string): ParsedBook {
 
     breaks.forEach((heading, position) => {
       const end = breaks[position + 1]?.line ?? lines.length;
-      // Skip the heading line itself: the reader renders the title as its own
-      // element, so leaving it in would print it twice.
       sections.push({ title: heading.title, body: lines.slice(heading.line + 1, end).join("\n") });
     });
   }
@@ -395,11 +269,6 @@ function splitChapters(rawMarkdown: string): ParsedBook {
   return { chapters, contents, totalWords };
 }
 
-/**
- * Backstop for books where docling found few headings: a 200k-word "chapter"
- * would be unreadable and slow to render, so oversized sections are cut at
- * paragraph boundaries.
- */
 function subdivide(section: { title: string; body: string }): {
   title: string;
   body: string;
