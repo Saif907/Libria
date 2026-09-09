@@ -1,11 +1,12 @@
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
 import {
   ArrowLeft,
-  ChevronLeft,
-  ChevronRight,
+  ChevronDown,
+  ChevronUp,
   FileText,
   Loader2,
+  Maximize2,
   MessageSquareQuote,
   Minus,
   Plus,
@@ -50,7 +51,7 @@ export const Route = createFileRoute("/pdf/$bookId")({
     };
   },
   errorComponent: PdfError,
-  component: NativePdfViewer,
+  component: ContinuousPdfViewer,
 });
 
 function PdfError({ error }: { error: Error }) {
@@ -74,17 +75,159 @@ function PdfError({ error }: { error: Error }) {
   );
 }
 
-function NativePdfViewer() {
+/**
+ * Individual Page Item with IntersectionObserver lazy-rendering.
+ * Unrendered pages maintain exact aspect-ratio placeholders so the scrollbar remains 100% accurate.
+ */
+const LazyPdfPage = memo(function LazyPdfPage({
+  pdfDoc,
+  pageNumber,
+  baseWidth,
+  scale,
+  aspectRatio,
+  onVisible,
+}: {
+  pdfDoc: any;
+  pageNumber: number;
+  baseWidth: number;
+  scale: number;
+  aspectRatio: number;
+  onVisible: (page: number) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const renderTaskRef = useRef<any>(null);
+  const [shouldRender, setShouldRender] = useState(false);
+  const [rendered, setRendered] = useState(false);
+
+  // IntersectionObserver to render only when within 400px of viewport
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setShouldRender(true);
+            // If the page is significantly in the center of view, set active
+            if (entry.intersectionRatio > 0.4) {
+              onVisible(pageNumber);
+            }
+          } else {
+            // Keep memory low: unmount canvas when far out of view (>1200px)
+            if (entry.boundingClientRect.top < -1500 || entry.boundingClientRect.top > 2500) {
+              setShouldRender(false);
+              setRendered(false);
+            }
+          }
+        }
+      },
+      {
+        rootMargin: "500px 0px 500px 0px",
+        threshold: [0.1, 0.5, 0.8],
+      },
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [pageNumber, onVisible]);
+
+  const targetWidth = Math.floor(baseWidth * scale);
+  const targetHeight = Math.floor(targetWidth / (aspectRatio || 0.77));
+
+  // Render to canvas once shouldRender is true
+  useEffect(() => {
+    if (!shouldRender || !pdfDoc || !canvasRef.current) return;
+
+    let isCurrent = true;
+
+    async function renderPage() {
+      try {
+        if (renderTaskRef.current) {
+          renderTaskRef.current.cancel();
+        }
+
+        const page = await pdfDoc.getPage(pageNumber);
+        if (!isCurrent || !canvasRef.current) return;
+
+        const unscaledViewport = page.getViewport({ scale: 1 });
+        const renderScale = targetWidth / unscaledViewport.width;
+        const viewport = page.getViewport({ scale: renderScale });
+
+        const canvas = canvasRef.current;
+        const context = canvas.getContext("2d");
+        if (!context) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const task = page.render({
+          canvasContext: context,
+          viewport,
+        });
+        renderTaskRef.current = task;
+        await task.promise;
+        if (isCurrent) setRendered(true);
+      } catch (err: any) {
+        if (err?.name !== "RenderingCancelledException") {
+          console.error(`Error rendering page ${pageNumber}:`, err);
+        }
+      }
+    }
+
+    renderPage();
+    return () => {
+      isCurrent = false;
+      if (renderTaskRef.current) {
+        renderTaskRef.current.cancel();
+      }
+    };
+  }, [shouldRender, pdfDoc, pageNumber, targetWidth]);
+
+  return (
+    <div
+      ref={containerRef}
+      id={`pdf-page-${pageNumber}`}
+      style={{ width: `${targetWidth}px`, minHeight: `${targetHeight}px` }}
+      className="relative mx-auto my-3 sm:my-5 rounded-xs shadow-md border border-border-subtle bg-white overflow-hidden transition-all"
+    >
+      {shouldRender ? (
+        <canvas ref={canvasRef} className="block w-full h-auto select-text" />
+      ) : null}
+
+      {!rendered ? (
+        <div
+          style={{ height: `${targetHeight}px` }}
+          className="flex flex-col items-center justify-center text-muted-foreground/50 text-xs bg-surface/30"
+        >
+          <Loader2 size={18} className="animate-spin text-accent mb-2" />
+          <span>Page {pageNumber}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+function ContinuousPdfViewer() {
   const { book, url } = Route.useLoaderData();
 
-  // PDF state
+  // Document state
   const [pdfDoc, setPdfDoc] = useState<any>(null);
-  const [pageNum, setPageNum] = useState<number>(1);
   const [numPages, setNumPages] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
-  const [rendering, setRendering] = useState<boolean>(false);
-  const [scale, setScale] = useState<number>(1.0);
+  const [aspectRatio, setAspectRatio] = useState<number>(0.75); // standard letter/A4 portrait
+
+  // Navigation & Scale state
+  const [activePage, setActivePage] = useState<number>(1);
   const [pageInput, setPageInput] = useState<string>("1");
+  const [scale, setScale] = useState<number>(1.0);
+  const [baseWidth, setBaseWidth] = useState<number>(760);
 
   // AI Ask Panel state
   const [ask, setAsk] = useState<boolean>(false);
@@ -92,22 +235,16 @@ function NativePdfViewer() {
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [selectedText, setSelectedText] = useState<string | null>(null);
 
-  // Refs
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const renderTaskRef = useRef<any>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
-  // 1. Load PDF Document via PDF.js on client mount
+  // 1. Initialize PDF.js
   useEffect(() => {
     let active = true;
 
-    async function initPdf() {
+    async function init() {
       try {
         setLoading(true);
-        // Client-only dynamic import to ensure zero SSR build conflicts
         const pdfjs = await import("pdfjs-dist");
-        
-        // Configure worker using CDN fallback or local bundle
         pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
         const loadingTask = pdfjs.getDocument({
@@ -121,8 +258,14 @@ function NativePdfViewer() {
 
         setPdfDoc(doc);
         setNumPages(doc.numPages);
-        setPageNum(1);
-        setPageInput("1");
+
+        // Inspect page 1 aspect ratio
+        const firstPage = await doc.getPage(1);
+        const vp = firstPage.getViewport({ scale: 1 });
+        if (vp.width && vp.height) {
+          setAspectRatio(vp.width / vp.height);
+        }
+
         setLoading(false);
       } catch (err) {
         console.error("Failed to load PDF:", err);
@@ -130,90 +273,54 @@ function NativePdfViewer() {
       }
     }
 
-    initPdf();
+    init();
     return () => {
       active = false;
     };
   }, [url]);
 
-  // 2. Render Page to Canvas
-  const renderCurrentPage = useCallback(async () => {
-    if (!pdfDoc || !canvasRef.current || !containerRef.current) return;
+  // 2. Responsive Base Width calculation (Mobile = 100% width, Desktop = capped readable width)
+  const updateLayoutWidth = useCallback(() => {
+    if (!scrollContainerRef.current) return;
+    const windowWidth = window.innerWidth;
+    const containerWidth = scrollContainerRef.current.clientWidth;
 
-    try {
-      if (renderTaskRef.current) {
-        renderTaskRef.current.cancel();
-      }
-
-      setRendering(true);
-      const page = await pdfDoc.getPage(pageNum);
-
-      // Fit to container width on mobile or apply user zoom scale
-      const containerWidth = containerRef.current.clientWidth - (window.innerWidth < 640 ? 24 : 64);
-      const unscaledViewport = page.getViewport({ scale: 1 });
-      
-      const autoScale = Math.min(Math.max(containerWidth / unscaledViewport.width, 0.5), 2.5);
-      const effectiveScale = autoScale * scale;
-
-      const viewport = page.getViewport({ scale: effectiveScale });
-      const canvas = canvasRef.current;
-      const context = canvas.getContext("2d");
-      if (!context) return;
-
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.floor(viewport.width * dpr);
-      canvas.height = Math.floor(viewport.height * dpr);
-      canvas.style.width = `${Math.floor(viewport.width)}px`;
-      canvas.style.height = `${Math.floor(viewport.height)}px`;
-
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-      const renderContext = {
-        canvasContext: context,
-        viewport,
-      };
-
-      const task = page.render(renderContext);
-      renderTaskRef.current = task;
-      await task.promise;
-      setRendering(false);
-    } catch (err: any) {
-      if (err?.name !== "RenderingCancelledException") {
-        console.error("Page render error:", err);
-      }
-      setRendering(false);
+    if (windowWidth < 768) {
+      // Mobile: Full width minus comfortable padding (16px on each side)
+      setBaseWidth(Math.max(containerWidth - 24, 300));
+    } else {
+      // Desktop / PC: Cap width at readable standard book width (max 780px)
+      setBaseWidth(Math.min(containerWidth - 80, 780));
     }
-  }, [pdfDoc, pageNum, scale]);
+  }, []);
 
   useEffect(() => {
-    renderCurrentPage();
-  }, [renderCurrentPage]);
+    updateLayoutWidth();
+    window.addEventListener("resize", updateLayoutWidth);
+    return () => window.removeEventListener("resize", updateLayoutWidth);
+  }, [updateLayoutWidth, ask]);
 
-  // 3. Page Navigation
-  const goToPage = (num: number) => {
-    const target = Math.min(Math.max(num, 1), numPages);
-    setPageNum(target);
-    setPageInput(String(target));
+  // 3. Scroll to specific page
+  const scrollToPage = (targetPage: number) => {
+    const clamped = Math.min(Math.max(targetPage, 1), numPages);
+    const el = document.getElementById(`pdf-page-${clamped}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      setActivePage(clamped);
+      setPageInput(String(clamped));
+    }
   };
 
-  // Keyboard navigation (Left/Right arrows)
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.key === "ArrowLeft") goToPage(pageNum - 1);
-      if (e.key === "ArrowRight") goToPage(pageNum + 1);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [pageNum, numPages]);
+  const handlePageVisible = useCallback((page: number) => {
+    setActivePage(page);
+    setPageInput(String(page));
+  }, []);
 
-  // 4. Text Selection for AI Ask Context
+  // 4. Capture Text Selection for AI Ask Context
   useEffect(() => {
     const onSelectionChange = () => {
       const sel = window.getSelection();
-      if (!sel || sel.isCollapsed) {
-        return;
-      }
+      if (!sel || sel.isCollapsed) return;
       const text = sel.toString().trim();
       if (text.length > 3) {
         setSelectedText(text);
@@ -228,47 +335,52 @@ function NativePdfViewer() {
     setAsk(true);
   };
 
-  const contextDetail = `${book.title} · page ${pageNum} of ${numPages || 1}`;
+  const contextDetail = `${book.title} · page ${activePage} of ${numPages || 1}`;
 
   return (
     <div className="flex h-[100dvh] flex-col bg-background select-text">
-      {/* Header Bar */}
-      <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border-subtle px-3 py-2 sm:px-4 sm:py-2.5">
-        <div className="flex items-center gap-1.5 min-w-0">
+      {/* Top Header */}
+      <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border-subtle px-3 py-2 sm:px-4 sm:py-2.5 z-20 bg-background/95 backdrop-blur-sm">
+        <div className="flex items-center gap-2 min-w-0">
           <Link to="/book/$bookId" params={{ bookId: book.id }}>
             <IconButton label="Back to book">
               <ArrowLeft size={18} strokeWidth={1.75} />
             </IconButton>
           </Link>
-          <div className="min-w-0 max-w-[200px] sm:max-w-xs">
+          <div className="min-w-0 max-w-[180px] sm:max-w-xs">
             <p className="truncate text-xs sm:text-sm font-medium text-foreground">{book.title}</p>
-            <p className="truncate text-2xs text-faint">PDF Reader · Page {pageNum} of {numPages || "…"}</p>
+            <p className="truncate text-2xs text-faint">
+              Continuous Scroll · Page {activePage} of {numPages || "…"}
+            </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          {/* Zoom controls */}
-          <div className="hidden sm:flex items-center gap-0.5 border border-border-subtle rounded-sm p-0.5 mr-1">
+        <div className="flex items-center gap-1 sm:gap-2">
+          {/* Zoom Controls */}
+          <div className="flex items-center gap-0.5 border border-border-subtle rounded-sm p-0.5">
             <IconButton
               label="Zoom Out"
-              onClick={() => setScale((s) => Math.max(s - 0.2, 0.6))}
+              onClick={() => setScale((s) => Math.max(Number((s - 0.15).toFixed(2)), 0.6))}
               disabled={scale <= 0.6}
             >
-              <Minus size={14} strokeWidth={1.75} />
+              <Minus size={13} strokeWidth={1.75} />
+            </IconButton>
+            <span className="text-2xs font-mono px-1.5 text-muted-foreground min-w-[36px] text-center">
+              {Math.round(scale * 100)}%
+            </span>
+            <IconButton
+              label="Zoom In"
+              onClick={() => setScale((s) => Math.min(Number((s + 0.15).toFixed(2)), 1.8))}
+              disabled={scale >= 1.8}
+            >
+              <Plus size={13} strokeWidth={1.75} />
             </IconButton>
             <IconButton
-              label="Reset Zoom"
+              label="Fit Normal"
               onClick={() => setScale(1.0)}
               disabled={scale === 1.0}
             >
               <RotateCcw size={12} strokeWidth={1.75} />
-            </IconButton>
-            <IconButton
-              label="Zoom In"
-              onClick={() => setScale((s) => Math.min(s + 0.2, 2.0))}
-              disabled={scale >= 2.0}
-            >
-              <Plus size={14} strokeWidth={1.75} />
             </IconButton>
           </div>
 
@@ -277,12 +389,12 @@ function NativePdfViewer() {
             <Link to="/read/$bookId" params={{ bookId: book.id }} search={{}}>
               <Button size="sm" variant="secondary" className="hidden sm:inline-flex gap-1.5 text-xs">
                 <FileText size={14} strokeWidth={1.75} />
-                Read text
+                Text
               </Button>
             </Link>
           ) : null}
 
-          {/* Ask AI Trigger Button */}
+          {/* Ask AI Toggle */}
           <Button
             size="sm"
             variant={ask ? "primary" : "secondary"}
@@ -295,29 +407,34 @@ function NativePdfViewer() {
         </div>
       </header>
 
-      {/* Main Reading Workspace + Ask Panel */}
+      {/* Main Workspace */}
       <div className="flex min-h-0 flex-1 relative overflow-hidden">
-        {/* PDF Canvas Viewport */}
+        {/* Continuous Scroll Container */}
         <main
-          ref={containerRef}
+          ref={scrollContainerRef}
           className={cn(
-            "flex-1 overflow-auto flex flex-col items-center justify-start p-3 sm:p-6 bg-surface/50 transition-all",
+            "flex-1 overflow-y-auto overflow-x-hidden p-2 sm:p-6 bg-surface/50 transition-all flex flex-col items-center",
             ask && "lg:mr-[420px]"
           )}
         >
           {loading ? (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-muted-foreground">
-              <Loader2 size={24} className="animate-spin text-accent" />
+            <div className="flex flex-col items-center justify-center my-auto py-20 gap-3 text-muted-foreground">
+              <Loader2 size={26} className="animate-spin text-accent" />
               <p className="text-sm">Loading {book.title}…</p>
             </div>
           ) : (
-            <div className="relative shadow-md rounded-xs overflow-hidden border border-border-subtle bg-white">
-              {rendering ? (
-                <div className="absolute inset-0 bg-background/20 backdrop-blur-[1px] flex items-center justify-center z-10">
-                  <Loader2 size={20} className="animate-spin text-accent" />
-                </div>
-              ) : null}
-              <canvas ref={canvasRef} className="block max-w-full" />
+            <div className="w-full flex flex-col items-center pb-24">
+              {Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
+                <LazyPdfPage
+                  key={pageNum}
+                  pdfDoc={pdfDoc}
+                  pageNumber={pageNum}
+                  baseWidth={baseWidth}
+                  scale={scale}
+                  aspectRatio={aspectRatio}
+                  onVisible={handlePageVisible}
+                />
+              ))}
             </div>
           )}
 
@@ -337,22 +454,22 @@ function NativePdfViewer() {
           ) : null}
         </main>
 
-        {/* Floating Page Navigation Bar */}
+        {/* Floating Quick Navigation Pill */}
         {!loading && numPages > 0 ? (
-          <nav className="fixed bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-background/95 backdrop-blur-sm border border-border shadow-md rounded-full px-3 py-1.5 text-xs">
+          <nav className="fixed bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-background/95 backdrop-blur-sm border border-border shadow-lg rounded-full px-3 py-1.5 text-xs">
             <IconButton
               label="Previous Page"
-              onClick={() => goToPage(pageNum - 1)}
-              disabled={pageNum <= 1}
+              onClick={() => scrollToPage(activePage - 1)}
+              disabled={activePage <= 1}
             >
-              <ChevronLeft size={16} strokeWidth={2} />
+              <ChevronUp size={16} strokeWidth={2} />
             </IconButton>
 
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 const p = parseInt(pageInput, 10);
-                if (!isNaN(p)) goToPage(p);
+                if (!isNaN(p)) scrollToPage(p);
               }}
               className="flex items-center gap-1 font-mono"
             >
@@ -360,7 +477,7 @@ function NativePdfViewer() {
                 type="text"
                 value={pageInput}
                 onChange={(e) => setPageInput(e.target.value)}
-                onBlur={() => setPageInput(String(pageNum))}
+                onBlur={() => setPageInput(String(activePage))}
                 className="w-10 text-center bg-surface border border-border-subtle rounded-xs px-1 py-0.5 text-xs text-foreground focus:outline-none focus:border-accent"
               />
               <span className="text-faint">/ {numPages}</span>
@@ -368,15 +485,15 @@ function NativePdfViewer() {
 
             <IconButton
               label="Next Page"
-              onClick={() => goToPage(pageNum + 1)}
-              disabled={pageNum >= numPages}
+              onClick={() => scrollToPage(activePage + 1)}
+              disabled={activePage >= numPages}
             >
-              <ChevronRight size={16} strokeWidth={2} />
+              <ChevronDown size={16} strokeWidth={2} />
             </IconButton>
           </nav>
         ) : null}
 
-        {/* Integrated Ask AI Sidebar (Desktop & Mobile Slide-over) */}
+        {/* Integrated Ask AI Sidebar (Desktop Docked, Mobile Drawer) */}
         {ask ? (
           <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[420px] flex-col border-l border-border bg-background shadow-panel animate-in slide-in-from-right duration-200">
             <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
