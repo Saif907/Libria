@@ -239,7 +239,19 @@ async function fetchCatalogFromStorage(targetUid: string): Promise<LibraryCatalo
   if (!raw) return null;
 
   try {
-    return JSON.parse(raw) as LibraryCatalog;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return {
+        version: "1.0",
+        user_id: targetUid,
+        updated_at: new Date().toISOString(),
+        total_books: parsed.length,
+        ready_books: parsed.filter((b) => b.has_markdown || b.is_indexed).length,
+        pending_conversion_books: 0,
+        books: parsed,
+      };
+    }
+    return parsed as LibraryCatalog;
   } catch (error) {
     console.warn(`Failed to parse catalog at ${catalogPath}:`, error);
     return null;

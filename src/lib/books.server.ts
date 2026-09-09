@@ -100,12 +100,19 @@ async function fetchLibrary(): Promise<LibraryBook[]> {
   const { ownerUid } = supabaseStorageConfig();
   const catalog = await loadCatalog(ownerUid);
 
-  if (!catalog || !Array.isArray(catalog.books)) {
+  // Resiliently support both { books: [...] } envelope and raw array [...]
+  const rawList: CatalogBook[] = Array.isArray(catalog)
+    ? (catalog as unknown as CatalogBook[])
+    : Array.isArray((catalog as any)?.books)
+      ? (catalog as any).books
+      : [];
+
+  if (rawList.length === 0) {
     console.warn("No catalog.json found or catalog.books is empty.");
     return [];
   }
 
-  return catalog.books
+  return rawList
     .map(catalogBookToLibraryBook)
     .sort((a, b) => a.title.localeCompare(b.title));
 }

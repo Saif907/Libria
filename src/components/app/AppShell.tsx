@@ -25,6 +25,7 @@ const primaryNav = [
 ];
 
 const secondaryNav = [
+  { to: "/import", label: "Import" },
   { to: "/highlights", label: "Highlights" },
   { to: "/notes", label: "Notes" },
   { to: "/audio", label: "Audio" },
