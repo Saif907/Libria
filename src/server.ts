@@ -46,6 +46,25 @@ function isH3SwallowedErrorBody(body: string): boolean {
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    // In Cloudflare Workers/Pages, environment variables and secrets are passed
+    // in the `env` parameter, not in Node's global `process.env`. We bridge them
+    // so server functions and libraries can access them transparently.
+    if (env && typeof env === "object") {
+      try {
+        if (typeof process === "undefined") {
+          (globalThis as unknown as { process: { env: Record<string, string> } }).process = { env: {} };
+        } else if (!process.env) {
+          (process as unknown as { env: Record<string, string> }).env = {};
+        }
+        Object.assign(process.env, env);
+      } catch {
+        // Guard against environments where process.env is sealed or read-only
+      }
+
+      (globalThis as unknown as { __CLOUDFLARE_ENV__?: Record<string, string> }).__CLOUDFLARE_ENV__ =
+        env as Record<string, string>;
+    }
+
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);

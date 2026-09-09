@@ -35,7 +35,9 @@ const DEFAULT_PREFIX = "outputs_md/docling_v1";
 const DEFAULT_PDF_PREFIX = "ebooks";
 
 function env(key: string): string | undefined {
-  const value = typeof process === "undefined" ? undefined : process.env?.[key];
+  const cfEnv = (globalThis as unknown as { __CLOUDFLARE_ENV__?: Record<string, string> })
+    .__CLOUDFLARE_ENV__;
+  const value = cfEnv?.[key] ?? (typeof process === "undefined" ? undefined : process.env?.[key]);
   return value !== undefined && value !== "" ? value : undefined;
 }
 
