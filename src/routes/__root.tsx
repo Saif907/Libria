@@ -4,10 +4,13 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useNavigate,
+  useRouterState,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { AuthProvider, useAuth } from "@/lib/auth";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
@@ -119,8 +122,68 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      <AuthProvider>
+        <AuthGate />
+      </AuthProvider>
     </QueryClientProvider>
   );
+}
+
+/* ---------- Route protection ---------- */
+
+const PUBLIC_ROUTES = ["/login", "/verify"];
+
+function AuthGate() {
+  const { user, loading } = useAuth();
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const [mounted, setMounted] = useState(false);
+
+  const isPublicRoute = PUBLIC_ROUTES.includes(pathname);
+
+  // Track client-side hydration.
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Redirect logic (client-side only, after hydration).
+  useEffect(() => {
+    if (!mounted || loading) return;
+
+    if (!user && !isPublicRoute) {
+      navigate({ to: "/login", replace: true });
+    } else if (user && pathname === "/login") {
+      navigate({ to: "/", replace: true });
+    }
+  }, [user, loading, isPublicRoute, pathname, navigate, mounted]);
+
+  // Public routes (login, verify) always render immediately — no auth gate.
+  if (isPublicRoute) {
+    return <Outlet />;
+  }
+
+  // Protected routes: show loading screen during SSR, hydration, and
+  // while the session is being resolved. Content NEVER renders without auth.
+  if (!mounted || loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="text-center">
+          <span className="font-serif text-lg font-semibold tracking-[-0.01em] text-foreground">
+            Marginalia
+          </span>
+          <div className="mt-4 flex justify-center">
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Not authenticated — redirect is in flight, render nothing.
+  if (!user) {
+    return null;
+  }
+
+  // Authenticated — render the app.
+  return <Outlet />;
 }

@@ -7,7 +7,7 @@ import {
   PageHeader,
   SearchInput,
 } from "@/components/app/primitives";
-import { books, getBook, highlights } from "@/lib/library-data";
+import { getBook, highlights } from "@/lib/library-data";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/highlights")({
@@ -35,14 +35,14 @@ function HighlightsPage() {
   const [filter, setFilter] = useState("All books");
   const [query, setQuery] = useState("");
 
-  const bookFilters = [
-    "All books",
-    ...Array.from(new Set(highlights.map((h) => getBook(h.bookId)?.title ?? ""))),
-  ];
+  const titles = Array.from(
+    new Set(highlights.map((h) => getBook(h.bookId).title)),
+  );
+  const bookFilters = ["All books", ...titles];
 
   const visible = highlights.filter((h) => {
     const inBook =
-      filter === "All books" || getBook(h.bookId)?.title === filter;
+      filter === "All books" || getBook(h.bookId).title === filter;
     const inQuery =
       !query ||
       h.text.toLowerCase().includes(query.toLowerCase()) ||
@@ -55,7 +55,7 @@ function HighlightsPage() {
       <Page>
         <PageHeader
           title="Highlights"
-          meta={`${highlights.length} passages across ${books.length} books — your raw material, untouched by synthesis`}
+          meta={`${highlights.length} passages across ${titles.length} books — your raw material, untouched by synthesis`}
         />
 
         <div className="flex flex-wrap items-center gap-3">
@@ -106,7 +106,7 @@ function HighlightsPage() {
                       params={{ bookId: h.bookId }}
                       className="text-xs font-medium text-foreground hover:text-accent"
                     >
-                      {getBook(h.bookId)?.title}
+                      {getBook(h.bookId).title}
                     </Link>
                     <span className="text-xs text-faint">
                       {h.chapter} · {h.date}

@@ -1,4 +1,4 @@
-import { books, getBook } from "./library-data";
+import { getBook } from "./library-data";
 
 /* ---------------- Scope ---------------- */
 
@@ -575,8 +575,6 @@ const splitSentences = (p: string) =>
 
 export const sentencesOf = splitSentences;
 
-export const bookTitleOf = (bookId: string) => getBook(bookId)?.title ?? bookId;
+export const bookTitleOf = (bookId: string) => getBook(bookId).title;
 
-export const bookAuthorOf = (bookId: string) => getBook(bookId)?.author ?? "";
-
-export const libraryBookCount = books.length;
+export const bookAuthorOf = (bookId: string) => getBook(bookId).author;

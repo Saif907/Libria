@@ -80,16 +80,21 @@ function KnowledgePage() {
                     {t.insight}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-                    {t.bookIds.map((id) => (
-                      <Link
-                        key={id}
-                        to="/book/$bookId"
-                        params={{ bookId: id }}
-                        className="text-xs text-muted-foreground hover:text-accent"
-                      >
-                        {getBook(id)?.title}
-                      </Link>
-                    ))}
+                    {t.bookIds.map((id) => {
+                      // Resolve first: these fixture ids are legacy slugs, and
+                      // the link has to carry the real one to open the book.
+                      const ref = getBook(id);
+                      return (
+                        <Link
+                          key={id}
+                          to="/book/$bookId"
+                          params={{ bookId: ref.id }}
+                          className="text-xs text-muted-foreground hover:text-accent"
+                        >
+                          {ref.title}
+                        </Link>
+                      );
+                    })}
                   </div>
                 </li>
               ))}

@@ -11,13 +11,21 @@ import {
   SectionTitle,
   TabBar,
 } from "@/components/app/primitives";
-import { getBook, highlights, notes } from "@/lib/library-data";
+import {
+  WORDS_PER_MINUTE,
+  formatMinutes,
+  getBookDetail,
+  hasMarkdown,
+  hasPdf,
+} from "@/lib/books";
+import { highlights, notes } from "@/lib/library-data";
+import { lastOpenedLabel, useProgress } from "@/lib/reading-progress";
 
 export const Route = createFileRoute("/book/$bookId")({
-  loader: ({ params }) => {
-    const book = getBook(params.bookId);
-    if (!book) throw notFound();
-    return { book };
+  loader: async ({ params }) => {
+    const detail = await getBookDetail({ data: { bookId: params.bookId } });
+    if (!detail) throw notFound();
+    return detail;
   },
   head: ({ loaderData }) => {
     if (!loaderData) {
@@ -30,7 +38,9 @@ export const Route = createFileRoute("/book/$bookId")({
     }
     const { book } = loaderData;
     const title = `${book.title} — Marginalia`;
-    const description = book.description.slice(0, 155);
+    const description = (
+      book.description || `${book.title} by ${book.author}, in your library.`
+    ).slice(0, 155);
     return {
       meta: [
         { title },
@@ -46,13 +56,31 @@ export const Route = createFileRoute("/book/$bookId")({
 });
 
 function BookDetail() {
-  const { book } = Route.useLoaderData();
+  const { book, chapters, totalWords } = Route.useLoaderData();
+  const { progress, fraction } = useProgress(book.id);
   const [tab, setTab] = useState("Chapters");
   const [ask, setAsk] = useState(false);
 
   const bookHighlights = highlights.filter((h) => h.bookId === book.id);
   const bookNotes = notes.filter((n) => n.bookId === book.id);
-  const currentIndex = Math.floor(book.progress * book.chapters.length);
+
+  // A PDF-only book has no parsed chapters, so everything chapter-shaped —
+  // progress, resume position, reading time — has nothing to stand on.
+  const readable = hasMarkdown(book) && chapters.length > 0;
+
+  // Where to resume, and how far each chapter counts as read.
+  const currentIndex =
+    readable && progress ? Math.min(progress.chapterIndex, chapters.length - 1) : 0;
+  const currentChapter = chapters[currentIndex];
+
+  const meta = [
+    book.author,
+    book.year > 0 ? String(book.year) : null,
+    readable ? `${chapters.length} ${chapters.length === 1 ? "chapter" : "chapters"}` : null,
+    readable ? `${formatMinutes(totalWords / WORDS_PER_MINUTE)} read` : null,
+    // Worth stating plainly: it explains why there is no reading time.
+    readable ? null : "PDF only",
+  ].filter(Boolean);
 
   return (
     <AppShell>
@@ -64,27 +92,64 @@ function BookDetail() {
               {book.title}
             </h1>
             <p className="mt-1.5 text-base text-muted-foreground">
-              {book.author} · {book.year} · {book.pages} pages
+              {meta.join(" · ")}
             </p>
-            <div className="mt-5 max-w-sm">
-              <ProgressBar value={book.progress} />
-              <p className="mt-1.5 text-xs text-faint">
-                {Math.round(book.progress * 100)}% · {book.chapter}
-              </p>
-            </div>
+            {readable ? (
+              <div className="mt-5 max-w-sm">
+                <ProgressBar value={fraction} />
+                <p className="mt-1.5 text-xs text-faint">
+                  {progress
+                    ? `${Math.round(fraction * 100)}% · ${currentChapter?.title ?? ""} · opened ${lastOpenedLabel(progress)}`
+                    : "Not opened yet"}
+                </p>
+              </div>
+            ) : null}
             <div className="mt-6 flex flex-wrap gap-2">
-              <Link to="/read/$bookId" params={{ bookId: book.id }}>
-                <Button variant="primary">Resume reading</Button>
-              </Link>
+              {/* Whichever formats exist, offered in reading order. The PDF is
+                  primary only when there is no text version to prefer. */}
+              {readable ? (
+                <Link
+                  to="/read/$bookId"
+                  params={{ bookId: book.id }}
+                  search={{ chapter: currentIndex }}
+                >
+                  <Button variant="primary">
+                    {progress ? "Resume reading" : "Start reading"}
+                  </Button>
+                </Link>
+              ) : null}
+              {hasPdf(book) ? (
+                <Link to="/pdf/$bookId" params={{ bookId: book.id }}>
+                  <Button variant={readable ? "secondary" : "primary"}>
+                    {readable ? "View PDF" : "Open PDF"}
+                  </Button>
+                </Link>
+              ) : null}
               <Link to="/audio">
                 <Button>Listen</Button>
               </Link>
               <Button onClick={() => setAsk(true)}>Ask about this book</Button>
               <Button variant="tertiary">Save</Button>
             </div>
-            <p className="mt-7 max-w-[60ch] font-serif text-[1.0625rem] leading-[1.6] text-foreground">
-              {book.description}
-            </p>
+            {book.description ? (
+              <p className="mt-7 max-w-[60ch] font-serif text-[1.0625rem] leading-[1.6] text-foreground">
+                {book.description}
+              </p>
+            ) : null}
+            {book.categories.length > 0 ? (
+              <div className="mt-6 flex flex-wrap gap-1.5">
+                {book.categories.map((c) => (
+                  <Link
+                    key={c}
+                    to="/"
+                    search={{ collection: book.collection }}
+                    className="rounded-xs border border-border px-1.5 py-0.5 text-2xs text-muted-foreground transition-colors hover:border-accent hover:text-accent"
+                  >
+                    {c.replace(/_/g, " ")}
+                  </Link>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -97,32 +162,53 @@ function BookDetail() {
 
           <div className="mt-6">
             {tab === "Chapters" ? (
-              <ul className="divide-y divide-border-subtle border-t border-border-subtle">
-                {book.chapters.map((c, i) => (
-                  <li key={c.id}>
-                    <Link
-                      to="/read/$bookId"
-                      params={{ bookId: book.id }}
-                      className="flex items-baseline gap-4 py-3.5 transition-colors hover:text-accent"
-                    >
-                      <span className="w-6 shrink-0 font-mono text-2xs text-faint">
-                        {String(i + 1).padStart(2, "0")}
-                      </span>
-                      <span className="min-w-0 flex-1 font-serif text-base text-foreground">
-                        {c.title}
-                      </span>
-                      <span className="shrink-0 text-xs text-faint">
-                        {Math.round(c.words / 220)} min ·{" "}
-                        {i < currentIndex
-                          ? "Read"
-                          : i === currentIndex
-                            ? "Reading"
-                            : "—"}
-                      </span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
+              readable ? (
+                <ul className="divide-y divide-border-subtle border-t border-border-subtle">
+                  {chapters.map((c, i) => (
+                    <li key={c.id}>
+                      <Link
+                        to="/read/$bookId"
+                        params={{ bookId: book.id }}
+                        search={{ chapter: i }}
+                        className="flex items-baseline gap-4 py-3.5 transition-colors hover:text-accent"
+                      >
+                        <span className="w-6 shrink-0 font-mono text-2xs text-faint">
+                          {String(i + 1).padStart(2, "0")}
+                        </span>
+                        <span className="min-w-0 flex-1 font-serif text-base text-foreground">
+                          {c.title}
+                        </span>
+                        <span className="shrink-0 text-xs text-faint">
+                          {formatMinutes(c.words / WORDS_PER_MINUTE)}
+                          {progress
+                            ? ` · ${
+                                i < currentIndex
+                                  ? "Read"
+                                  : i === currentIndex
+                                    ? "Reading"
+                                    : "—"
+                              }`
+                            : ""}
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <EmptyState
+                  line="No chapter list for this one"
+                  explanation="Chapters come from the converted text, and this book exists only as a PDF. The PDF viewer has its own page navigation and search."
+                  {...(hasPdf(book)
+                    ? {
+                        action: (
+                          <Link to="/pdf/$bookId" params={{ bookId: book.id }}>
+                            <Button variant="primary">Open PDF</Button>
+                          </Link>
+                        ),
+                      }
+                    : {})}
+                />
+              )
             ) : null}
 
             {tab === "Highlights" ? (

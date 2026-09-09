@@ -14,7 +14,10 @@ import { Route as AudioRouteImport } from './routes/audio'
 import { Route as ContinueRouteImport } from './routes/continue'
 import { Route as HighlightsRouteImport } from './routes/highlights'
 import { Route as KnowledgeRouteImport } from './routes/knowledge'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as VerifyRouteImport } from './routes/verify'
 import { Route as BookBookIdRouteImport } from './routes/book.$bookId'
+import { Route as PdfBookIdRouteImport } from './routes/pdf.$bookId'
 import { Route as ReadBookIdRouteImport } from './routes/read.$bookId'
 
 const IndexRoute = IndexRouteImport.update({
@@ -42,9 +45,24 @@ const KnowledgeRoute = KnowledgeRouteImport.update({
   path: '/knowledge',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VerifyRoute = VerifyRouteImport.update({
+  id: '/verify',
+  path: '/verify',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BookBookIdRoute = BookBookIdRouteImport.update({
   id: '/book/$bookId',
   path: '/book/$bookId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PdfBookIdRoute = PdfBookIdRouteImport.update({
+  id: '/pdf/$bookId',
+  path: '/pdf/$bookId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ReadBookIdRoute = ReadBookIdRouteImport.update({
@@ -59,7 +77,10 @@ export interface FileRoutesByFullPath {
   '/continue': typeof ContinueRoute
   '/highlights': typeof HighlightsRoute
   '/knowledge': typeof KnowledgeRoute
+  '/login': typeof LoginRoute
+  '/verify': typeof VerifyRoute
   '/book/$bookId': typeof BookBookIdRoute
+  '/pdf/$bookId': typeof PdfBookIdRoute
   '/read/$bookId': typeof ReadBookIdRoute
 }
 export interface FileRoutesByTo {
@@ -68,7 +89,10 @@ export interface FileRoutesByTo {
   '/continue': typeof ContinueRoute
   '/highlights': typeof HighlightsRoute
   '/knowledge': typeof KnowledgeRoute
+  '/login': typeof LoginRoute
+  '/verify': typeof VerifyRoute
   '/book/$bookId': typeof BookBookIdRoute
+  '/pdf/$bookId': typeof PdfBookIdRoute
   '/read/$bookId': typeof ReadBookIdRoute
 }
 export interface FileRoutesById {
@@ -78,7 +102,10 @@ export interface FileRoutesById {
   '/continue': typeof ContinueRoute
   '/highlights': typeof HighlightsRoute
   '/knowledge': typeof KnowledgeRoute
+  '/login': typeof LoginRoute
+  '/verify': typeof VerifyRoute
   '/book/$bookId': typeof BookBookIdRoute
+  '/pdf/$bookId': typeof PdfBookIdRoute
   '/read/$bookId': typeof ReadBookIdRoute
 }
 export interface FileRouteTypes {
@@ -89,7 +116,10 @@ export interface FileRouteTypes {
     | '/continue'
     | '/highlights'
     | '/knowledge'
+    | '/login'
+    | '/verify'
     | '/book/$bookId'
+    | '/pdf/$bookId'
     | '/read/$bookId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -98,7 +128,10 @@ export interface FileRouteTypes {
     | '/continue'
     | '/highlights'
     | '/knowledge'
+    | '/login'
+    | '/verify'
     | '/book/$bookId'
+    | '/pdf/$bookId'
     | '/read/$bookId'
   id:
     | '__root__'
@@ -107,7 +140,10 @@ export interface FileRouteTypes {
     | '/continue'
     | '/highlights'
     | '/knowledge'
+    | '/login'
+    | '/verify'
     | '/book/$bookId'
+    | '/pdf/$bookId'
     | '/read/$bookId'
   fileRoutesById: FileRoutesById
 }
@@ -117,7 +153,10 @@ export interface RootRouteChildren {
   ContinueRoute: typeof ContinueRoute
   HighlightsRoute: typeof HighlightsRoute
   KnowledgeRoute: typeof KnowledgeRoute
+  LoginRoute: typeof LoginRoute
+  VerifyRoute: typeof VerifyRoute
   BookBookIdRoute: typeof BookBookIdRoute
+  PdfBookIdRoute: typeof PdfBookIdRoute
   ReadBookIdRoute: typeof ReadBookIdRoute
 }
 
@@ -158,11 +197,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof KnowledgeRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/verify': {
+      id: '/verify'
+      path: '/verify'
+      fullPath: '/verify'
+      preLoaderRoute: typeof VerifyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/book/$bookId': {
       id: '/book/$bookId'
       path: '/book/$bookId'
       fullPath: '/book/$bookId'
       preLoaderRoute: typeof BookBookIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/pdf/$bookId': {
+      id: '/pdf/$bookId'
+      path: '/pdf/$bookId'
+      fullPath: '/pdf/$bookId'
+      preLoaderRoute: typeof PdfBookIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/read/$bookId': {
@@ -181,7 +241,10 @@ const rootRouteChildren: RootRouteChildren = {
   ContinueRoute: ContinueRoute,
   HighlightsRoute: HighlightsRoute,
   KnowledgeRoute: KnowledgeRoute,
+  LoginRoute: LoginRoute,
+  VerifyRoute: VerifyRoute,
   BookBookIdRoute: BookBookIdRoute,
+  PdfBookIdRoute: PdfBookIdRoute,
   ReadBookIdRoute: ReadBookIdRoute,
 }
 export const routeTree = rootRouteImport

@@ -1,6 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  LogOut,
   Pause,
   Play,
   Search,
@@ -10,7 +12,9 @@ import {
   Moon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { collections } from "@/lib/library-data";
+import { collectionLabels, getLibrary } from "@/lib/books";
+import { useAuth } from "@/lib/auth";
+import { supabase } from "@/lib/supabase";
 import { IconButton } from "./primitives";
 
 const primaryNav = [
@@ -67,10 +71,48 @@ function NavLink({ to, label }: { to: string; label: string }) {
   );
 }
 
+/**
+ * Collections come from the categories in the library manifest. Shared query
+ * key with the library route's own fetch, so navigating between pages does not
+ * re-list the bucket.
+ */
+function useCollections(): string[] {
+  const { data } = useQuery({
+    queryKey: ["library"],
+    queryFn: () => getLibrary(),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  return useMemo(() => {
+    const labels = new Set<string>();
+    for (const book of data ?? []) {
+      for (const label of collectionLabels(book)) labels.add(label);
+    }
+    return [...labels].sort((a, b) => a.localeCompare(b));
+  }, [data]);
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const { dark, toggle } = useTheme();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [playing, setPlaying] = useState(false);
+  const { user } = useAuth();
+  const collections = useCollections();
+
+  // Derive display name and initials from the auth session.
+  const displayName =
+    user?.user_metadata?.full_name ?? user?.email ?? "User";
+  const initials =
+    displayName
+      .split(/[\s@]/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((s: string) => s[0]?.toUpperCase() ?? "")
+      .join("") || "U";
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+  };
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -98,21 +140,25 @@ export function AppShell({ children }: { children: ReactNode }) {
             ))}
           </div>
 
-          <div className="my-4 border-t border-border-subtle" />
+          {collections.length > 0 ? (
+            <>
+              <div className="my-4 border-t border-border-subtle" />
 
-          <p className="px-2.5 pb-1.5 text-metadata">Collections</p>
-          <div className="space-y-px">
-            {collections.map((c) => (
-              <Link
-                key={c}
-                to="/"
-                search={{ collection: c }}
-                className="block rounded-sm px-2.5 py-[7px] text-sm text-muted-foreground transition-colors duration-150 hover:bg-hover hover:text-foreground"
-              >
-                {c}
-              </Link>
-            ))}
-          </div>
+              <p className="px-2.5 pb-1.5 text-metadata">Collections</p>
+              <div className="space-y-px">
+                {collections.map((c) => (
+                  <Link
+                    key={c}
+                    to="/"
+                    search={{ collection: c }}
+                    className="block rounded-sm px-2.5 py-[7px] text-sm text-muted-foreground transition-colors duration-150 hover:bg-hover hover:text-foreground"
+                  >
+                    {c}
+                  </Link>
+                ))}
+              </div>
+            </>
+          ) : null}
         </nav>
 
         <div className="border-t border-border-subtle px-3 py-3">
@@ -135,15 +181,17 @@ export function AppShell({ children }: { children: ReactNode }) {
               )}
             </IconButton>
           </div>
-          <Link
-            to="/settings"
-            className="mt-1 flex items-center gap-2.5 rounded-sm px-2.5 py-2 transition-colors hover:bg-hover"
-          >
-            <span className="flex h-7 w-7 items-center justify-center rounded-full border border-border text-xs font-medium text-muted-foreground">
-              AR
+          <div className="mt-1 flex items-center gap-2.5 px-2.5 py-2">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border text-xs font-medium text-muted-foreground">
+              {initials}
             </span>
-            <span className="text-sm text-foreground">Anna Reyes</span>
-          </Link>
+            <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+              {displayName}
+            </span>
+            <IconButton label="Sign out" onClick={handleSignOut}>
+              <LogOut size={15} strokeWidth={1.75} />
+            </IconButton>
+          </div>
         </div>
       </aside>
 
