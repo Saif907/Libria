@@ -19,10 +19,34 @@ const SIGNED_URL_CACHE_MS = (SIGNED_URL_TTL_SECONDS / 2) * 1000;
 const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes in-memory cache
 
 function env(key: string): string | undefined {
+  // 1. Cloudflare runtime context (__CLOUDFLARE_ENV__)
   const cfEnv = (globalThis as unknown as { __CLOUDFLARE_ENV__?: Record<string, string> })
     .__CLOUDFLARE_ENV__;
-  const value = cfEnv?.[key] ?? (typeof process === "undefined" ? undefined : process.env?.[key]);
-  return value !== undefined && value !== "" ? value : undefined;
+  if (cfEnv?.[key]) return cfEnv[key];
+  if (cfEnv?.[`VITE_${key}`]) return cfEnv[`VITE_${key}`];
+
+  // 2. Standard process.env with whitespace-trimming tolerance (handles "KEY = val")
+  if (typeof process !== "undefined" && process.env) {
+    if (process.env[key]) return process.env[key];
+    if (process.env[`VITE_${key}`]) return process.env[`VITE_${key}`];
+    for (const [k, v] of Object.entries(process.env)) {
+      if ((k.trim() === key || k.trim() === `VITE_${key}`) && v) {
+        return v.trim().replace(/^["']|["']$/g, "");
+      }
+    }
+  }
+
+  // 3. Vite SSR import.meta.env (for Vite dev server)
+  const viteEnv = (import.meta as unknown as { env?: Record<string, string> })?.env;
+  if (viteEnv?.[key]) return viteEnv[key];
+  if (viteEnv?.[`VITE_${key}`]) return viteEnv[`VITE_${key}`];
+
+  // 4. Cloudflare Worker globalThis binding
+  const globalObj = globalThis as Record<string, unknown>;
+  const globalVal = globalObj[key] ?? globalObj[`VITE_${key}`];
+  if (typeof globalVal === "string" && globalVal !== "") return globalVal;
+
+  return undefined;
 }
 
 export function supabaseStorageConfig(): {
@@ -31,15 +55,43 @@ export function supabaseStorageConfig(): {
   bucket: string;
   ownerUid: string;
 } {
-  const url = env("SUPABASE_URL") ?? env("VITE_SUPABASE_URL");
-  const serviceRoleKey = env("SUPABASE_SERVICE_ROLE_KEY") ?? env("SUPABASE_SERVICE_KEY");
-  const bucket = env("SUPABASE_BUCKET") ?? DEFAULT_BUCKET;
-  const ownerUid = env("SUPABASE_OWNER_UID") ?? DEFAULT_OWNER_UID;
+  const url =
+    env("SUPABASE_URL") ??
+    env("VITE_SUPABASE_URL");
+
+  const serviceRoleKey =
+    env("SUPABASE_SERVICE_ROLE_KEY") ??
+    env("VITE_SUPABASE_SERVICE_ROLE_KEY") ??
+    env("SUPABASE_SERVICE_KEY") ??
+    env("VITE_SUPABASE_SERVICE_KEY");
+
+  const bucket =
+    env("SUPABASE_BUCKET") ??
+    env("VITE_SUPABASE_BUCKET") ??
+    DEFAULT_BUCKET;
+
+  const ownerUid =
+    env("SUPABASE_OWNER_UID") ??
+    env("VITE_SUPABASE_OWNER_UID") ??
+    DEFAULT_OWNER_UID;
 
   if (!url || !serviceRoleKey) {
+    const missing: string[] = [];
+    if (!url) missing.push("SUPABASE_URL / VITE_SUPABASE_URL");
+    if (!serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY / VITE_SUPABASE_SERVICE_ROLE_KEY");
+
+    // Gather available key names safely (without values) for troubleshooting
+    const cf = (globalThis as unknown as { __CLOUDFLARE_ENV__?: Record<string, string> })
+      .__CLOUDFLARE_ENV__;
+    const detectedKeys = [
+      ...Object.keys(cf ?? {}),
+      ...Object.keys(typeof process !== "undefined" && process.env ? process.env : {}),
+      ...Object.keys((import.meta as unknown as { env?: Record<string, string> })?.env ?? {}),
+    ];
+
     throw new SupabaseStorageError(
-      "Missing Supabase server credentials. Set SUPABASE_URL (or VITE_SUPABASE_URL) and " +
-        "SUPABASE_SERVICE_ROLE_KEY in frontend/.env",
+      `Missing Supabase server credentials on Cloudflare: [${missing.join(", ")}]. ` +
+        `Detected environment keys: [${[...new Set(detectedKeys)].filter((k) => !k.includes("KEY") && !k.includes("SECRET") && !k.includes("JSON")).join(", ")}]`,
     );
   }
 
