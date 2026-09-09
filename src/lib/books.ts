@@ -216,14 +216,14 @@ function parseBookId(input: unknown): { bookId: string } {
 }
 
 export const getBookDetail = createServerFn({ method: "GET" })
-  .inputValidator(parseBookId)
+  .validator(parseBookId)
   .handler(async ({ data }): Promise<BookDetail | null> => {
     const { loadBookDetail } = await import("./books.server");
     return loadBookDetail(data.bookId);
   });
 
 export const getChapterContent = createServerFn({ method: "GET" })
-  .inputValidator((input: unknown): { bookId: string; index: number } => {
+  .validator((input: unknown): { bookId: string; index: number } => {
     const { bookId } = parseBookId(input);
     const rawIndex = (input as { index?: unknown }).index;
     const index = typeof rawIndex === "number" ? rawIndex : Number(rawIndex ?? 0);
@@ -243,7 +243,7 @@ export const getChapterContent = createServerFn({ method: "GET" })
  * credentials that signed it never leave the server.
  */
 export const getPdfUrl = createServerFn({ method: "GET" })
-  .inputValidator(parseBookId)
+  .validator(parseBookId)
   .handler(async ({ data }): Promise<string | null> => {
     const { loadPdfUrl } = await import("./books.server");
     return loadPdfUrl(data.bookId);
