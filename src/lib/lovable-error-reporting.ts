@@ -25,6 +25,10 @@ declare global {
 
 export function reportLovableError(error: unknown, context: Record<string, unknown> = {}) {
   if (typeof window === "undefined") return;
+  // Ignore known Chromium DevTools Live Metrics / Soft Navigation observer bug
+  if (error instanceof Error && error.message.includes("reading 'startTime'")) {
+    return;
+  }
   window.__lovableEvents?.captureException?.(
     error,
     {

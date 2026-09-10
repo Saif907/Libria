@@ -1,7 +1,8 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Eye, EyeOff, Loader2, BookOpen } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/login")({
@@ -22,6 +23,8 @@ export const Route = createFileRoute("/login")({
 type Mode = "signin" | "signup";
 
 function LoginPage() {
+  const navigate = useNavigate();
+  const { signIn } = useAuth();
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -38,6 +41,13 @@ function LoginPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     resetFeedback();
+
+    if (!isSupabaseConfigured) {
+      setError(
+        "Supabase credentials (VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY) are not configured. Please ensure they are set in frontend/.env and restart the dev server.",
+      );
+      return;
+    }
 
     const trimmedEmail = email.trim();
 
@@ -60,7 +70,7 @@ function LoginPage() {
           password,
           options: {
             // After the user clicks the confirmation link, Supabase will
-            // redirect them to /verify which handles the Steam-like flow.
+            // redirect them to /verify which handles the verification flow.
             emailRedirectTo: `${window.location.origin}/verify`,
           },
         });
@@ -71,19 +81,22 @@ function LoginPage() {
         );
         setLoading(false);
       } else {
-        const { error: signInError } =
-          await supabase.auth.signInWithPassword({
-            email: trimmedEmail,
-            password,
-          });
-        if (signInError) throw signInError;
+        await signIn(trimmedEmail, password);
 
-        // Don't set loading to false — keep the spinner while the AuthGate
-        // detects the new session and redirects to the home page.
+        // Immediately navigate to the home library upon successful authentication
+        navigate({ to: "/", replace: true });
       }
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : "Something went wrong.";
+      let message = "Something went wrong.";
+      if (err instanceof Error) {
+        if (err.message.toLowerCase().includes("invalid login credentials")) {
+          message = "Invalid email or password. Please check your credentials and try again.";
+        } else if (err.message.toLowerCase().includes("email not confirmed")) {
+          message = "Please confirm your email address before signing in. Check your inbox for the confirmation link.";
+        } else {
+          message = err.message;
+        }
+      }
       setError(message);
       setLoading(false);
     }

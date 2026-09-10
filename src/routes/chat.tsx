@@ -14,6 +14,7 @@ import {
 } from "@/lib/agent-settings";
 import { getLibrary, type LibraryBook } from "@/lib/books";
 import { type Citation } from "@/lib/ask-data";
+import type { AttachedPageContext } from "@/components/app/AskPanel";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -78,6 +79,8 @@ interface ChatMessage {
   role: "user" | "assistant";
   content: string | string[];
   timestamp: string;
+  attachedPage?: AttachedPageContext;
+  contextPassage?: string;
   persona?: AgentPersonaId;
   taggedBooks?: string[];
   taggedCategories?: string[];
@@ -702,6 +705,33 @@ function ChatWorkspacePage() {
                       <div className="flex items-start justify-end gap-3">
                         <div className="max-w-[85%] sm:max-w-[75%] space-y-1.5 text-right">
                           <div className="inline-block rounded-lg bg-surface border border-border px-4 py-2.5 text-xs text-foreground shadow-2xs leading-relaxed text-left">
+                            {/* Attached Page Photo Badge */}
+                            {msg.attachedPage ? (
+                              <div className="mb-2 flex items-center gap-2 rounded-xs border border-accent/30 bg-background/80 p-1.5 text-2xs text-muted-foreground">
+                                <div className="h-10 w-8 rounded-xs overflow-hidden border border-border bg-surface shrink-0 shadow-2xs">
+                                  <img
+                                    src={msg.attachedPage.imageUrl}
+                                    alt={`Page ${msg.attachedPage.pageNumber}`}
+                                    className="h-full w-full object-cover"
+                                  />
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="font-mono font-medium text-accent">Page {msg.attachedPage.pageNumber}</p>
+                                  {msg.attachedPage.bookTitle ? (
+                                    <p className="truncate text-3xs text-faint max-w-[160px]">{msg.attachedPage.bookTitle}</p>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ) : null}
+
+                            {/* Attached Excerpt Badge */}
+                            {msg.contextPassage ? (
+                              <div className="mb-2 flex items-start gap-1.5 rounded-xs border-l-2 border-accent bg-background/80 px-2 py-1 text-2xs text-muted-foreground">
+                                <Quote size={11} className="shrink-0 text-accent mt-0.5" />
+                                <p className="line-clamp-2 italic font-serif">“{msg.contextPassage}”</p>
+                              </div>
+                            ) : null}
+
                             {typeof msg.content === "string" ? msg.content : msg.content.join("\n\n")}
                           </div>
 

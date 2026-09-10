@@ -104,10 +104,31 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 });
 
 function RootShell({ children }: { children: ReactNode }) {
+  // Public-only credentials injected safely for client hydration resilience
+  const publicEnv = {
+    VITE_SUPABASE_URL:
+      typeof process !== "undefined" && process.env
+        ? (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "")
+        : "",
+    VITE_SUPABASE_PUBLISHABLE_KEY:
+      typeof process !== "undefined" && process.env
+        ? (process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+           process.env.VITE_SUPABASE_ANON_KEY ||
+           process.env.SUPABASE_PUBLISHABLE_KEY ||
+           process.env.SUPABASE_ANON_KEY ||
+           "")
+        : "",
+  };
+
   return (
     <html lang="en">
       <head>
         <HeadContent />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `window.__ENV__ = Object.assign(window.__ENV__ || {}, ${JSON.stringify(publicEnv)});`,
+          }}
+        />
       </head>
       <body>
         {children}
@@ -179,9 +200,20 @@ function AuthGate() {
     );
   }
 
-  // Not authenticated — redirect is in flight, render nothing.
+  // Not authenticated — redirect to /login is in flight, keep the loading shell
   if (!user) {
-    return null;
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="text-center">
+          <span className="font-serif text-lg font-semibold tracking-[-0.01em] text-foreground">
+            Libria
+          </span>
+          <div className="mt-4 flex justify-center">
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // Authenticated — render the app.

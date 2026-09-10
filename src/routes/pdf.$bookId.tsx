@@ -13,10 +13,11 @@ import {
   Minus,
   Plus,
   RotateCcw,
+  Sparkles,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { AskBody } from "@/components/app/AskPanel";
+import { AskBody, type AttachedPageContext } from "@/components/app/AskPanel";
 import { Button, IconButton } from "@/components/app/primitives";
 import { getBookDetail, getPdfUrl, hasMarkdown } from "@/lib/books";
 import type { Answer, Scope } from "@/lib/ask-data";
@@ -91,6 +92,8 @@ const LazyPdfPage = memo(function LazyPdfPage({
   scale,
   aspectRatio,
   onVisible,
+  onSelectPage,
+  isSelected,
 }: {
   pdfDoc: any;
   pdfjs: any;
@@ -99,6 +102,8 @@ const LazyPdfPage = memo(function LazyPdfPage({
   scale: number;
   aspectRatio: number;
   onVisible: (page: number) => void;
+  onSelectPage?: (pageNumber: number, canvas: HTMLCanvasElement) => void;
+  isSelected?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -107,6 +112,46 @@ const LazyPdfPage = memo(function LazyPdfPage({
   const textLayerTaskRef = useRef<any>(null);
   const [shouldRender, setShouldRender] = useState(false);
   const [rendered, setRendered] = useState(false);
+
+  // Hold / Long-press detection (450ms press without scrolling)
+  const longPressTimerRef = useRef<any>(null);
+  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
+
+  const handleHoldTrigger = useCallback(() => {
+    if (!canvasRef.current || !onSelectPage) return;
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      navigator.vibrate(40);
+    }
+    onSelectPage(pageNumber, canvasRef.current);
+  }, [pageNumber, onSelectPage]);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const touch = e.touches[0];
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY };
+    longPressTimerRef.current = setTimeout(() => {
+      handleHoldTrigger();
+    }, 450);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchStartPos.current || !longPressTimerRef.current) return;
+    const touch = e.touches[0];
+    const dx = Math.abs(touch.clientX - touchStartPos.current.x);
+    const dy = Math.abs(touch.clientY - touchStartPos.current.y);
+    // Cancel hold if user is scrolling (moved finger > 12px)
+    if (dx > 12 || dy > 12) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    touchStartPos.current = null;
+  };
 
   // IntersectionObserver to render only when within 400px of viewport
   useEffect(() => {
@@ -233,8 +278,40 @@ const LazyPdfPage = memo(function LazyPdfPage({
       ref={containerRef}
       id={`pdf-page-${pageNumber}`}
       style={{ width: `${targetWidth}px`, minHeight: `${targetHeight}px` }}
-      className="relative mx-auto my-3 sm:my-5 rounded-xs shadow-md border border-border-subtle bg-white overflow-hidden transition-all select-text"
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
+      className={cn(
+        "relative mx-auto my-3 sm:my-5 rounded-xs shadow-md border bg-white overflow-hidden transition-all select-text group",
+        isSelected
+          ? "border-accent ring-2 ring-accent/60 shadow-lg"
+          : "border-border-subtle hover:border-accent/40"
+      )}
     >
+      {/* Floating Page Quick-Action Pill (Hover on desktop, or easily tapped) */}
+      {rendered ? (
+        <div className="absolute top-2.5 right-2.5 z-10 opacity-80 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-150 pointer-events-auto">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleHoldTrigger();
+            }}
+            className={cn(
+              "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-2xs font-medium shadow-md backdrop-blur-sm transition-all cursor-pointer",
+              isSelected
+                ? "bg-accent text-accent-foreground ring-1 ring-accent"
+                : "bg-background/90 text-foreground border border-border hover:bg-accent hover:text-accent-foreground"
+            )}
+            title={`Ask AI about Page ${pageNumber}`}
+          >
+            <Sparkles size={11} className={isSelected ? "fill-current" : "text-accent"} />
+            <span>{isSelected ? `Page ${pageNumber} Attached` : `Ask Page ${pageNumber}`}</span>
+          </button>
+        </div>
+      ) : null}
+
       {shouldRender ? (
         <>
           <canvas ref={canvasRef} className="block w-full h-auto pointer-events-none select-none" />
@@ -279,6 +356,30 @@ function ContinuousPdfViewer() {
   const [scope, setScope] = useState<Scope>("page");
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [selectedText, setSelectedText] = useState<string | null>(null);
+  const [attachedPage, setAttachedPage] = useState<AttachedPageContext | null>(null);
+
+  // Capture whole page photo snapshot
+  const handleSelectPage = useCallback(
+    (pageNum: number, canvas: HTMLCanvasElement) => {
+      try {
+        const imageUrl = canvas.toDataURL("image/jpeg", 0.85);
+        const pageCtx: AttachedPageContext = {
+          pageNumber: pageNum,
+          imageUrl,
+          bookTitle: book.title,
+          bookId: book.id,
+        };
+        setAttachedPage(pageCtx);
+        setScope("page");
+        setAsk(true);
+        toast.success(`Attached Page ${pageNum} photo to Ask AI`);
+      } catch (err) {
+        console.error("Failed to capture page snapshot", err);
+        toast.error("Could not capture page photo");
+      }
+    },
+    [book.title, book.id]
+  );
 
   const {
     isWide: isSidebarWide,
@@ -490,6 +591,8 @@ function ContinuousPdfViewer() {
                   scale={scale}
                   aspectRatio={aspectRatio}
                   onVisible={handlePageVisible}
+                  onSelectPage={handleSelectPage}
+                  isSelected={attachedPage?.pageNumber === pageNum}
                 />
               ))}
             </div>
@@ -575,6 +678,26 @@ function ContinuousPdfViewer() {
                 >
                   <ChevronDown size={16} strokeWidth={2} />
                 </IconButton>
+
+                <div className="h-3.5 w-px bg-border-subtle mx-0.5" />
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const canvas = document.querySelector(`#pdf-page-${activePage} canvas`) as HTMLCanvasElement | null;
+                    if (canvas) {
+                      handleSelectPage(activePage, canvas);
+                    } else {
+                      setScope("page");
+                      setAsk(true);
+                    }
+                  }}
+                  className="flex items-center gap-1 text-2xs text-muted-foreground hover:text-accent font-medium transition-colors px-1 py-0.5 cursor-pointer"
+                  title={`Ask about Page ${activePage}`}
+                >
+                  <Sparkles size={12} className="text-accent" />
+                  <span className="hidden sm:inline">Ask Page {activePage}</span>
+                </button>
               </nav>
             </div>
           ) : null}
@@ -626,6 +749,8 @@ function ContinuousPdfViewer() {
                   setScope={setScope}
                   contextDetail={contextDetail}
                   {...(selectedText && scope === "selection" ? { contextPassage: selectedText } : {})}
+                  attachedPage={attachedPage ?? undefined}
+                  onClearPage={() => setAttachedPage(null)}
                   answer={answer}
                   setAnswer={setAnswer}
                   availableScopes={["selection", "page", "book", "library"]}

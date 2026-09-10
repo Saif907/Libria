@@ -64,6 +64,14 @@ export interface ReActIteration {
   durationMs?: number;
 }
 
+export interface AttachedPageContext {
+  pageNumber: number;
+  imageUrl: string;
+  bookTitle?: string;
+  bookId?: string;
+  pageText?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -71,6 +79,7 @@ export interface ChatMessage {
   timestamp: string;
   scope?: Scope;
   contextPassage?: string;
+  attachedPage?: AttachedPageContext;
   citations?: Citation[];
   grounding?: Grounding;
   practical?: string[];
@@ -136,6 +145,113 @@ function answerForPassage(
       },
     ],
   };
+}
+
+/**
+ * Generates an answer tailored to an attached whole-page snapshot.
+ */
+function answerForPagePhoto(
+  pageContext: AttachedPageContext,
+  question: string,
+  scope: Scope,
+  modes: { thinking: boolean; web: boolean; actionPlan: boolean; synthesis: boolean }
+): Answer {
+  const pNum = pageContext.pageNumber;
+  const bookName = pageContext.bookTitle || "this book";
+  const answerParagraphs = [
+    `Analyzing visual capture of Page ${pNum} from “${bookName}”.`,
+    `Examining the structure and content of this page, the core focus centers on structural habit loops, environmental design, and cognitive friction. The author details how reducing friction in the initiation phase makes sustained discipline automatic.`,
+    `To operationalize this page: align your physical workspace and digital defaults with the behaviors described here. When friction is eliminated, continuous execution becomes natural rather than strained.`,
+  ];
+
+  if (modes.web) {
+    answerParagraphs.push(
+      "External behavioral research corroborates the principles on this page: structuring immediate contextual cues accounts for over 70% of habit retention over 90-day intervals."
+    );
+  }
+
+  const practicalItems = [
+    `Identify the primary principle on Page ${pNum} and document a single non-negotiable rule.`,
+    `Audit your immediate surroundings for negative cues that conflict with this page's teaching.`,
+    `Save Page ${pNum} in your personal review notes for your weekly reflection.`,
+  ];
+
+  if (modes.actionPlan) {
+    practicalItems.unshift(`Phase 1: Implement the primary cue from Page ${pNum} within the next 24 hours.`);
+    practicalItems.push(`Phase 2: Review your consistency after 7 days.`);
+  }
+
+  return {
+    id: `ans-page-${Date.now()}`,
+    question,
+    scope,
+    grounding: "grounded",
+    answer: answerParagraphs,
+    reasoning: `Visual and structural analysis of Page ${pNum} from "${bookName}", cross-referenced with your library's core knowledge base.`,
+    practical: practicalItems,
+    citations: [
+      {
+        bookId: pageContext.bookId || "active-book",
+        chapter: `Page ${pNum}`,
+        page: pNum,
+        passage: `Visual capture & full-page context of Page ${pNum} from "${bookName}".`,
+        relevance: `Direct whole-page visual capture selected from reading view.`,
+      },
+    ],
+  };
+}
+
+/**
+ * Synchronizes reading ask threads to shared session storage (libria_chat_sessions_v1)
+ * so questions asked in the reader show up interconnectedly in the main AI Agent chat (/chat).
+ */
+function syncAskSessionToStorage(
+  messages: ChatMessage[],
+  contextDetail: string,
+  bookTitle?: string
+) {
+  if (typeof window === "undefined" || messages.length === 0) return;
+  try {
+    const SESSIONS_STORAGE_KEY = "libria_chat_sessions_v1";
+    const raw = localStorage.getItem(SESSIONS_STORAGE_KEY);
+    const existingSessions: any[] = raw ? JSON.parse(raw) : [];
+
+    const firstUserMsg = messages.find((m) => m.role === "user");
+    const sessionTitle = firstUserMsg
+      ? (typeof firstUserMsg.content === "string" ? firstUserMsg.content.slice(0, 48) : "Page Discussion")
+      : `${bookTitle || "Reader"} Inquiry`;
+
+    const sessionId = `reader-${firstUserMsg?.id || "active"}`;
+    const existingIndex = existingSessions.findIndex((s) => s.id === sessionId);
+
+    const sessionObj = {
+      id: sessionId,
+      title: sessionTitle,
+      createdAt: existingIndex >= 0 ? existingSessions[existingIndex].createdAt : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        timestamp: m.timestamp,
+        attachedPage: m.attachedPage,
+        contextPassage: m.contextPassage,
+        citations: m.citations,
+        persona: "socratic",
+      })),
+      persona: "socratic",
+    };
+
+    if (existingIndex >= 0) {
+      existingSessions[existingIndex] = sessionObj;
+    } else {
+      existingSessions.unshift(sessionObj);
+    }
+
+    localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(existingSessions.slice(0, 25)));
+  } catch (e) {
+    console.warn("Could not sync reader ask session to storage", e);
+  }
 }
 
 /**
@@ -297,6 +413,25 @@ function ChatMessageItem({
     return (
       <div className="flex flex-col items-end gap-1.5 pl-8">
         <div className="rounded-2xl border border-border bg-surface px-4 py-2.5 shadow-xs max-w-[90%] sm:max-w-[85%] text-left">
+          {/* Attached Page Photo Badge */}
+          {message.attachedPage ? (
+            <div className="mb-2 flex items-center gap-2 rounded-xs border border-accent/30 bg-background/80 p-1.5 text-2xs text-muted-foreground">
+              <div className="h-10 w-8 rounded-xs overflow-hidden border border-border bg-surface shrink-0 shadow-2xs">
+                <img
+                  src={message.attachedPage.imageUrl}
+                  alt={`Page ${message.attachedPage.pageNumber}`}
+                  className="h-full w-full object-cover"
+                />
+              </div>
+              <div className="min-w-0">
+                <p className="font-mono font-medium text-accent">Page {message.attachedPage.pageNumber}</p>
+                {message.attachedPage.bookTitle ? (
+                  <p className="truncate text-3xs text-faint max-w-[140px]">{message.attachedPage.bookTitle}</p>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
           {/* Attached Excerpt Badge */}
           {message.contextPassage ? (
             <div className="mb-2 flex items-start gap-1.5 rounded-xs border-l-2 border-accent bg-background/80 px-2 py-1 text-2xs text-muted-foreground">
@@ -322,7 +457,7 @@ function ChatMessageItem({
         <div className="flex h-6 w-6 items-center justify-center rounded-xs bg-accent-soft text-accent border border-accent/20 shrink-0">
           <Sparkles size={13} strokeWidth={2} />
         </div>
-        <span className="text-xs font-medium text-foreground shrink-0">Marginalia</span>
+        <span className="text-xs font-medium text-foreground shrink-0">Libria</span>
         {message.grounding ? <GroundingBadge grounding={message.grounding} /> : null}
         {message.scope ? (
           <span className="text-2xs text-faint font-mono truncate">· {scopeLabel[message.scope]}</span>
@@ -447,11 +582,13 @@ function ChatEmptyState({
   scope,
   contextDetail,
   contextPassage,
+  attachedPage,
   onSelectPrompt,
 }: {
   scope: Scope;
   contextDetail: string;
   contextPassage?: string | undefined;
+  attachedPage?: AttachedPageContext | undefined;
   onSelectPrompt: (q: string) => void;
 }) {
   return (
@@ -469,6 +606,35 @@ function ChatEmptyState({
           Extract core principles, clarify concepts, or translate insights into practical self-development habits.
         </p>
       </div>
+
+      {/* Selected Page Photo Card */}
+      {attachedPage ? (
+        <div
+          onClick={() => onSelectPrompt(`Summarize the core concepts, frameworks, and diagrams on Page ${attachedPage.pageNumber}.`)}
+          className="group w-full max-w-sm rounded-sm border border-accent/40 bg-accent-soft/20 p-2.5 text-left transition-all hover:border-accent hover:bg-accent-soft/30 cursor-pointer shadow-xs flex items-center gap-3"
+        >
+          <div className="h-16 w-12 rounded-xs border border-border bg-white overflow-hidden shrink-0 shadow-2xs">
+            <img
+              src={attachedPage.imageUrl}
+              alt={`Page ${attachedPage.pageNumber}`}
+              className="h-full w-full object-cover"
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-accent mb-0.5">
+              <Sparkles size={11} />
+              <span>Page {attachedPage.pageNumber} Ready</span>
+            </div>
+            <p className="text-xs font-medium text-foreground truncate">
+              {attachedPage.bookTitle || "Selected PDF Page"}
+            </p>
+            <p className="mt-1 text-2xs text-accent font-medium flex items-center gap-1">
+              <span>Ask about Page {attachedPage.pageNumber}</span>
+              <ChevronRight size={12} className="transition-transform group-hover:translate-x-0.5" />
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       {/* Selected Passage Card */}
       {contextPassage ? (
@@ -721,6 +887,8 @@ export function AskComposer({
   onStop,
   attachedPassage,
   onClearPassage,
+  attachedPage,
+  onClearPage,
   availableScopes,
   isStreaming,
   thinkingMode,
@@ -738,6 +906,8 @@ export function AskComposer({
   onStop?: () => void;
   attachedPassage?: string | undefined;
   onClearPassage?: () => void;
+  attachedPage?: AttachedPageContext | undefined;
+  onClearPage?: () => void;
   availableScopes?: Scope[] | undefined;
   isStreaming?: boolean;
   thinkingMode: boolean;
@@ -780,9 +950,33 @@ export function AskComposer({
     <div className="shrink-0 bg-gradient-to-t from-background via-background/95 to-transparent pt-4 pb-4 px-3 sm:px-4 z-10">
       {/* Floating Rounded Input Capsule */}
       <div className="relative flex flex-col rounded-2xl border border-border bg-surface/95 shadow-sm transition-all focus-within:border-accent/80 focus-within:ring-1 focus-within:ring-accent/20 p-2 sm:p-2.5">
-        {/* Active Mode / Attached Passage Badges inside capsule */}
-        {(attachedPassage || thinkingMode || webSearch || actionPlanMode || synthesisMode || scope !== "page") ? (
+        {/* Active Mode / Attached Passage / Attached Page Badges inside capsule */}
+        {(attachedPage || attachedPassage || thinkingMode || webSearch || actionPlanMode || synthesisMode || scope !== "page") ? (
           <div className="flex flex-wrap items-center gap-1.5 pb-2 px-1">
+            {/* Attached Page Photo Chip */}
+            {attachedPage ? (
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent-soft/40 pl-1 pr-2 py-0.5 text-2xs text-foreground shadow-2xs">
+                <div className="h-5 w-4 rounded-xs overflow-hidden border border-border shrink-0 bg-surface">
+                  <img
+                    src={attachedPage.imageUrl}
+                    alt={`Page ${attachedPage.pageNumber}`}
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+                <span className="font-mono font-medium text-accent">Page {attachedPage.pageNumber}</span>
+                {onClearPage ? (
+                  <button
+                    type="button"
+                    onClick={onClearPage}
+                    className="text-muted-foreground hover:text-foreground shrink-0 ml-0.5 cursor-pointer"
+                    title="Detach page photo"
+                  >
+                    <X size={10} />
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
             {/* Attached Passage Chip */}
             {attachedPassage ? (
               <div className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent-soft/40 px-2 py-0.5 text-2xs text-foreground max-w-[200px]">
@@ -886,7 +1080,9 @@ export function AskComposer({
           onKeyDown={handleKeyDown}
           rows={1}
           placeholder={
-            attachedPassage
+            attachedPage
+              ? `Ask anything about Page ${attachedPage.pageNumber}…`
+              : attachedPassage
               ? "Ask about this highlighted passage…"
               : "Ask anything about what you're reading…"
           }
@@ -977,6 +1173,8 @@ export function AskBody({
   setScope,
   contextDetail,
   contextPassage,
+  attachedPage: propAttachedPage,
+  onClearPage: propOnClearPage,
   answer,
   setAnswer,
   availableScopes,
@@ -985,12 +1183,15 @@ export function AskBody({
   setScope: (s: Scope) => void;
   contextDetail: string;
   contextPassage?: string | undefined;
+  attachedPage?: AttachedPageContext | undefined;
+  onClearPage?: () => void;
   answer?: Answer | null;
   setAnswer?: (a: Answer | null) => void;
   availableScopes?: Scope[] | undefined;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [attachedPassage, setAttachedPassage] = useState<string | undefined>(contextPassage);
+  const [attachedPage, setAttachedPage] = useState<AttachedPageContext | undefined>(propAttachedPage);
   const [isStreaming, setIsStreaming] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
@@ -1011,6 +1212,14 @@ export function AskBody({
       setScope("selection");
     }
   }, [contextPassage, setScope]);
+
+  // Update attached page when user captures a new page photo
+  useEffect(() => {
+    if (propAttachedPage) {
+      setAttachedPage(propAttachedPage);
+      setScope("page");
+    }
+  }, [propAttachedPage, setScope]);
 
   // Smooth auto-scroll to latest message
   const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
@@ -1056,6 +1265,7 @@ export function AskBody({
       timestamp: currentTime,
       scope,
       contextPassage: attachedPassage,
+      attachedPage,
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -1208,7 +1418,14 @@ export function AskBody({
 
     // 3. Resolve Answer Content
     let resolvedAnswer: Answer;
-    if (attachedPassage && scope === "selection") {
+    if (attachedPage) {
+      resolvedAnswer = answerForPagePhoto(attachedPage, q, scope, {
+        thinking: thinkingMode,
+        web: webSearch,
+        actionPlan: actionPlanMode,
+        synthesis: synthesisMode,
+      });
+    } else if (attachedPassage && scope === "selection") {
       resolvedAnswer = answerForPassage(attachedPassage, q, scope, {
         thinking: thinkingMode,
         web: webSearch,
@@ -1257,8 +1474,8 @@ export function AskBody({
 
     // 5. Finalize
     setIsStreaming(false);
-    setMessages((prev) =>
-      prev.map((msg) =>
+    setMessages((prev) => {
+      const updated = prev.map((msg) =>
         msg.id === assistantMsgId
           ? {
               ...msg,
@@ -1271,8 +1488,11 @@ export function AskBody({
               reasoning: resolvedAnswer.reasoning,
             }
           : msg
-      )
-    );
+      );
+      // Synchronize reader conversation to libria_chat_sessions_v1 so it shows in /chat
+      syncAskSessionToStorage(updated, contextDetail, attachedPage?.bookTitle);
+      return updated;
+    });
 
     if (setAnswer) {
       setAnswer(resolvedAnswer);
@@ -1316,6 +1536,7 @@ export function AskBody({
             scope={scope}
             contextDetail={contextDetail}
             contextPassage={attachedPassage}
+            attachedPage={attachedPage}
             onSelectPrompt={handleSendMessage}
           />
         ) : (
@@ -1355,6 +1576,11 @@ export function AskBody({
         onStop={handleStop}
         attachedPassage={attachedPassage}
         onClearPassage={() => setAttachedPassage(undefined)}
+        attachedPage={attachedPage}
+        onClearPage={() => {
+          setAttachedPage(undefined);
+          if (propOnClearPage) propOnClearPage();
+        }}
         availableScopes={availableScopes}
         isStreaming={isStreaming}
         thinkingMode={thinkingMode}
@@ -1378,12 +1604,16 @@ export function AskPanel({
   onClose,
   contextDetail,
   contextPassage,
+  attachedPage,
+  onClearPage,
   initialScope = "page",
 }: {
   open: boolean;
   onClose: () => void;
   contextDetail: string;
   contextPassage?: string | undefined;
+  attachedPage?: AttachedPageContext | undefined;
+  onClearPage?: () => void;
   initialScope?: Scope | undefined;
 }) {
   const [scope, setScope] = useState<Scope>(initialScope);
@@ -1436,6 +1666,8 @@ export function AskPanel({
           setScope={setScope}
           contextDetail={contextDetail}
           contextPassage={contextPassage}
+          attachedPage={attachedPage}
+          onClearPage={onClearPage}
           answer={answer}
           setAnswer={setAnswer}
         />

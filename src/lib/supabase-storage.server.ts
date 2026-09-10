@@ -36,7 +36,32 @@ function env(key: string): string | undefined {
     }
   }
 
-  // 3. Vite SSR import.meta.env (for Vite dev server)
+  // 3. Vite SSR import.meta.env with static property access for compiler inlining
+  if (key === "SUPABASE_URL" || key === "VITE_SUPABASE_URL") {
+    if (import.meta.env?.VITE_SUPABASE_URL) return import.meta.env.VITE_SUPABASE_URL;
+  }
+  if (
+    key === "SUPABASE_SERVICE_ROLE_KEY" ||
+    key === "VITE_SUPABASE_SERVICE_ROLE_KEY" ||
+    key === "SUPABASE_SERVICE_KEY"
+  ) {
+    if (import.meta.env?.VITE_SUPABASE_SERVICE_ROLE_KEY) return import.meta.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+    if ((import.meta.env as unknown as Record<string, string>)?.SUPABASE_SERVICE_ROLE_KEY) {
+      return (import.meta.env as unknown as Record<string, string>).SUPABASE_SERVICE_ROLE_KEY;
+    }
+  }
+  if (key === "SUPABASE_BUCKET" || key === "VITE_SUPABASE_BUCKET") {
+    if (import.meta.env?.VITE_SUPABASE_BUCKET) return import.meta.env.VITE_SUPABASE_BUCKET;
+    if ((import.meta.env as unknown as Record<string, string>)?.SUPABASE_BUCKET) {
+      return (import.meta.env as unknown as Record<string, string>).SUPABASE_BUCKET;
+    }
+  }
+  if (key === "SUPABASE_OWNER_UID" || key === "VITE_SUPABASE_OWNER_UID") {
+    if (import.meta.env?.VITE_SUPABASE_OWNER_UID) return import.meta.env.VITE_SUPABASE_OWNER_UID;
+    if ((import.meta.env as unknown as Record<string, string>)?.SUPABASE_OWNER_UID) {
+      return (import.meta.env as unknown as Record<string, string>).SUPABASE_OWNER_UID;
+    }
+  }
   const viteEnv = (import.meta as unknown as { env?: Record<string, string> })?.env;
   if (viteEnv?.[key]) return viteEnv[key];
   if (viteEnv?.[`VITE_${key}`]) return viteEnv[`VITE_${key}`];
