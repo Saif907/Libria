@@ -11,8 +11,10 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AudioRouteImport } from './routes/audio'
+import { Route as ChatRouteImport } from './routes/chat'
 import { Route as ContinueRouteImport } from './routes/continue'
 import { Route as HighlightsRouteImport } from './routes/highlights'
+import { Route as ImportRouteImport } from './routes/import'
 import { Route as KnowledgeRouteImport } from './routes/knowledge'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as VerifyRouteImport } from './routes/verify'
@@ -30,6 +32,11 @@ const AudioRoute = AudioRouteImport.update({
   path: '/audio',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChatRoute = ChatRouteImport.update({
+  id: '/chat',
+  path: '/chat',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ContinueRoute = ContinueRouteImport.update({
   id: '/continue',
   path: '/continue',
@@ -38,6 +45,11 @@ const ContinueRoute = ContinueRouteImport.update({
 const HighlightsRoute = HighlightsRouteImport.update({
   id: '/highlights',
   path: '/highlights',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ImportRoute = ImportRouteImport.update({
+  id: '/import',
+  path: '/import',
   getParentRoute: () => rootRouteImport,
 } as any)
 const KnowledgeRoute = KnowledgeRouteImport.update({
@@ -74,8 +86,10 @@ const ReadBookIdRoute = ReadBookIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/audio': typeof AudioRoute
+  '/chat': typeof ChatRoute
   '/continue': typeof ContinueRoute
   '/highlights': typeof HighlightsRoute
+  '/import': typeof ImportRoute
   '/knowledge': typeof KnowledgeRoute
   '/login': typeof LoginRoute
   '/verify': typeof VerifyRoute
@@ -86,8 +100,10 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/audio': typeof AudioRoute
+  '/chat': typeof ChatRoute
   '/continue': typeof ContinueRoute
   '/highlights': typeof HighlightsRoute
+  '/import': typeof ImportRoute
   '/knowledge': typeof KnowledgeRoute
   '/login': typeof LoginRoute
   '/verify': typeof VerifyRoute
@@ -99,8 +115,10 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/audio': typeof AudioRoute
+  '/chat': typeof ChatRoute
   '/continue': typeof ContinueRoute
   '/highlights': typeof HighlightsRoute
+  '/import': typeof ImportRoute
   '/knowledge': typeof KnowledgeRoute
   '/login': typeof LoginRoute
   '/verify': typeof VerifyRoute
@@ -113,8 +131,10 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/audio'
+    | '/chat'
     | '/continue'
     | '/highlights'
+    | '/import'
     | '/knowledge'
     | '/login'
     | '/verify'
@@ -125,8 +145,10 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/audio'
+    | '/chat'
     | '/continue'
     | '/highlights'
+    | '/import'
     | '/knowledge'
     | '/login'
     | '/verify'
@@ -137,8 +159,10 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/audio'
+    | '/chat'
     | '/continue'
     | '/highlights'
+    | '/import'
     | '/knowledge'
     | '/login'
     | '/verify'
@@ -150,8 +174,10 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AudioRoute: typeof AudioRoute
+  ChatRoute: typeof ChatRoute
   ContinueRoute: typeof ContinueRoute
   HighlightsRoute: typeof HighlightsRoute
+  ImportRoute: typeof ImportRoute
   KnowledgeRoute: typeof KnowledgeRoute
   LoginRoute: typeof LoginRoute
   VerifyRoute: typeof VerifyRoute
@@ -176,6 +202,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AudioRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/chat': {
+      id: '/chat'
+      path: '/chat'
+      fullPath: '/chat'
+      preLoaderRoute: typeof ChatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/continue': {
       id: '/continue'
       path: '/continue'
@@ -188,6 +221,13 @@ declare module '@tanstack/react-router' {
       path: '/highlights'
       fullPath: '/highlights'
       preLoaderRoute: typeof HighlightsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/import': {
+      id: '/import'
+      path: '/import'
+      fullPath: '/import'
+      preLoaderRoute: typeof ImportRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/knowledge': {
@@ -238,8 +278,10 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AudioRoute: AudioRoute,
+  ChatRoute: ChatRoute,
   ContinueRoute: ContinueRoute,
   HighlightsRoute: HighlightsRoute,
+  ImportRoute: ImportRoute,
   KnowledgeRoute: KnowledgeRoute,
   LoginRoute: LoginRoute,
   VerifyRoute: VerifyRoute,

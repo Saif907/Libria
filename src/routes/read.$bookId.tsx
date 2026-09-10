@@ -7,7 +7,9 @@ import {
   FileText,
   Headphones,
   List,
+  Maximize2,
   MessageSquareQuote,
+  Minimize2,
   Type as TypeIcon,
   X,
 } from "lucide-react";
@@ -24,6 +26,7 @@ import {
 import { useProgress } from "@/lib/reading-progress";
 import type { Answer, Scope } from "@/lib/ask-data";
 import { cn } from "@/lib/utils";
+import { useResizableSidebar, SidebarResizeHandle } from "@/hooks/use-resizable-sidebar";
 
 export const Route = createFileRoute("/read/$bookId")({
   validateSearch: (s: Record<string, unknown>): { chapter?: number } => {
@@ -118,9 +121,17 @@ function Reader() {
   const [toc, setToc] = useState(false);
   const [type, setType] = useState(false);
   const [ask, setAsk] = useState(false);
-  const [scope, setScope] = useState<Scope>("page");
+  const [scope, setScope] = useState<Scope>("chapter");
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const {
+    isWide: isSidebarWide,
+    isDragging: isSidebarDragging,
+    handlePointerDown: handleSidebarResize,
+    resetWidth: resetSidebarWidth,
+    toggleWide: toggleSidebarWide,
+    asideStyle,
+  } = useResizableSidebar();
   const [settings, setSettings] = useState<Record<string, string>>({
     Font: "Literata",
     Size: "19",
@@ -203,13 +214,13 @@ function Reader() {
   return (
     <div
       className={cn(
-        "min-h-screen bg-background",
+        "h-[100dvh] flex flex-col bg-background overflow-hidden select-text",
         settings["Theme"] === "Night" && "dark",
       )}
       style={readerVars}
     >
       {/* Reader chrome */}
-      <header className="sticky top-0 z-30 border-b border-border-subtle bg-background/95 backdrop-blur">
+      <header className="shrink-0 z-30 border-b border-border-subtle bg-background/95 backdrop-blur">
         <div className="flex items-center gap-2 px-4 py-2.5">
           <Link to="/book/$bookId" params={{ bookId: book.id }}>
             <IconButton label="Back to book">
@@ -245,8 +256,14 @@ function Reader() {
               <Headphones size={18} strokeWidth={1.75} />
             </IconButton>
           </Link>
-          <Button size="sm" onClick={() => openAskWith(null, "chapter")}>
-            Ask
+          <Button
+            size="sm"
+            variant={ask ? "primary" : "secondary"}
+            onClick={() => setAsk((p) => !p)}
+            className="gap-1.5 text-xs"
+          >
+            <MessageSquareQuote size={14} strokeWidth={1.75} />
+            <span>Ask AI</span>
           </Button>
         </div>
         <ProgressBar value={fraction} className="h-[2px]" />
@@ -284,8 +301,10 @@ function Reader() {
         </div>
       ) : null}
 
-      <div className={cn("flex", ask && "lg:mr-[440px]")}>
-        <main className="min-w-0 flex-1">
+      {/* Split Workspace: Section 1 (Reading) + Section 2 (AI Sidebar) */}
+      <div className="flex min-h-0 flex-1 relative overflow-hidden">
+        {/* SECTION 1: Book Reading Section (Fluidly auto-adjusting, independent scroll) */}
+        <main className="min-w-0 flex-1 h-full overflow-y-auto overflow-x-hidden">
           <article
             ref={articleRef}
             className={cn(
@@ -345,24 +364,54 @@ function Reader() {
         </main>
 
         {ask ? (
-          <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[440px] flex-col border-l border-border bg-background shadow-panel">
-            <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
-              <span className="text-sm font-medium text-foreground">Ask</span>
-              <IconButton label="Close Ask panel" onClick={() => setAsk(false)}>
-                <X size={16} strokeWidth={1.75} />
-              </IconButton>
-            </header>
-            <div className="flex-1 overflow-y-auto px-4 py-4">
-              <AskBody
-                scope={scope}
-                setScope={setScope}
-                contextDetail={`${content.title} · chapter ${index + 1} of ${total}`}
-                {...(selected ? { contextPassage: selected } : {})}
-                answer={answer}
-                setAnswer={setAnswer}
+          <>
+            {/* Mobile backdrop */}
+            <div
+              className="lg:hidden fixed inset-0 z-40 bg-foreground/20 backdrop-blur-xs"
+              onClick={() => setAsk(false)}
+            />
+            <aside
+              style={asideStyle}
+              className={cn(
+                "fixed inset-y-0 right-0 z-50 flex w-full max-w-full sm:max-w-[440px] flex-col border-l border-border bg-background shadow-panel",
+                "lg:relative lg:inset-auto lg:h-full lg:shrink-0 lg:max-w-none lg:shadow-none",
+                "transition-[width] duration-75 ease-out",
+                isSidebarDragging && "select-none transition-none"
+              )}
+            >
+              <SidebarResizeHandle
+                onPointerDown={handleSidebarResize}
+                onDoubleClick={resetSidebarWidth}
+                isDragging={isSidebarDragging}
               />
-            </div>
-          </aside>
+              <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3 shrink-0">
+                <span className="text-sm font-medium text-foreground">Ask</span>
+                <div className="flex items-center gap-1">
+                  <IconButton
+                    label={isSidebarWide ? "Collapse width" : "Expand width"}
+                    onClick={toggleSidebarWide}
+                    className="hidden lg:inline-flex"
+                  >
+                    {isSidebarWide ? <Minimize2 size={15} strokeWidth={1.75} /> : <Maximize2 size={15} strokeWidth={1.75} />}
+                  </IconButton>
+                  <IconButton label="Close Ask panel" onClick={() => setAsk(false)}>
+                    <X size={16} strokeWidth={1.75} />
+                  </IconButton>
+                </div>
+              </header>
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                <AskBody
+                  scope={scope}
+                  setScope={setScope}
+                  contextDetail={`${content.title} · chapter ${index + 1} of ${total}`}
+                  {...(selected ? { contextPassage: selected } : {})}
+                  answer={answer}
+                  setAnswer={setAnswer}
+                  availableScopes={["selection", "chapter", "book", "library"]}
+                />
+              </div>
+            </aside>
+          </>
         ) : null}
       </div>
 

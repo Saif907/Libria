@@ -14,7 +14,15 @@ export type IndexingStage =
   | "indexed"
   | "failed";
 
-export type IndexingJobStatus = "pending" | "processing" | "completed" | "failed";
+export type IndexingJobStatus =
+  | "queued"
+  | "in_progress"
+  | "pending"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "cancelling"
+  | "cancelled";
 
 export interface IndexingJobResponse {
   job_id: string;
@@ -29,6 +37,7 @@ export interface IndexingJobResponse {
   total_tokens: number;
   version: number;
   skipped_duplicate: boolean;
+  cancel_requested?: boolean;
   error_message?: string | null;
   created_at: string;
   completed_at?: string | null;
@@ -102,6 +111,19 @@ export async function pollJobApi(jobId: string): Promise<IndexingJobResponse> {
   const response = await fetch(`${API_BASE}/api/v1/books/jobs/${jobId}`);
   if (!response.ok) {
     throw new Error(`Failed to check job progress (${response.status})`);
+  }
+  return response.json();
+}
+
+/**
+ * Requests atomic cancellation and rollback of an active indexing job.
+ */
+export async function cancelJobApi(jobId: string): Promise<IndexingJobResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/books/jobs/${jobId}/cancel`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to request job cancellation (${response.status})`);
   }
   return response.json();
 }

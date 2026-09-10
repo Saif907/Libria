@@ -80,11 +80,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "Libria — Personal AI Library & Mentor" },
+      { name: "description", content: "AI-native personal wisdom library and self-development mentor" },
+      { name: "author", content: "Libria" },
+      { property: "og:title", content: "Libria — Personal AI Library & Mentor" },
+      { property: "og:description", content: "AI-native personal wisdom library and self-development mentor" },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Lovable" },
@@ -169,7 +169,7 @@ function AuthGate() {
       <div className="flex min-h-screen items-center justify-center bg-background">
         <div className="text-center">
           <span className="font-serif text-lg font-semibold tracking-[-0.01em] text-foreground">
-            Marginalia
+            Libria
           </span>
           <div className="mt-4 flex justify-center">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />

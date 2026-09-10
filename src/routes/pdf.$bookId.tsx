@@ -4,20 +4,24 @@ import {
   ArrowLeft,
   ChevronDown,
   ChevronUp,
+  Copy,
   FileText,
   Loader2,
   Maximize2,
   MessageSquareQuote,
+  Minimize2,
   Minus,
   Plus,
   RotateCcw,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 import { AskBody } from "@/components/app/AskPanel";
 import { Button, IconButton } from "@/components/app/primitives";
 import { getBookDetail, getPdfUrl, hasMarkdown } from "@/lib/books";
 import type { Answer, Scope } from "@/lib/ask-data";
 import { cn } from "@/lib/utils";
+import { useResizableSidebar, SidebarResizeHandle } from "@/hooks/use-resizable-sidebar";
 
 export const Route = createFileRoute("/pdf/$bookId")({
   staleTime: 60_000,
@@ -81,6 +85,7 @@ function PdfError({ error }: { error: Error }) {
  */
 const LazyPdfPage = memo(function LazyPdfPage({
   pdfDoc,
+  pdfjs,
   pageNumber,
   baseWidth,
   scale,
@@ -88,6 +93,7 @@ const LazyPdfPage = memo(function LazyPdfPage({
   onVisible,
 }: {
   pdfDoc: any;
+  pdfjs: any;
   pageNumber: number;
   baseWidth: number;
   scale: number;
@@ -96,7 +102,9 @@ const LazyPdfPage = memo(function LazyPdfPage({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const textLayerRef = useRef<HTMLDivElement | null>(null);
   const renderTaskRef = useRef<any>(null);
+  const textLayerTaskRef = useRef<any>(null);
   const [shouldRender, setShouldRender] = useState(false);
   const [rendered, setRendered] = useState(false);
 
@@ -136,7 +144,7 @@ const LazyPdfPage = memo(function LazyPdfPage({
   const targetWidth = Math.floor(baseWidth * scale);
   const targetHeight = Math.floor(targetWidth / (aspectRatio || 0.77));
 
-  // Render to canvas once shouldRender is true
+  // Render to canvas and textLayer once shouldRender is true
   useEffect(() => {
     if (!shouldRender || !pdfDoc || !canvasRef.current) return;
 
@@ -146,6 +154,12 @@ const LazyPdfPage = memo(function LazyPdfPage({
       try {
         if (renderTaskRef.current) {
           renderTaskRef.current.cancel();
+        }
+        if (textLayerTaskRef.current) {
+          try {
+            textLayerTaskRef.current.cancel();
+          } catch {}
+          textLayerTaskRef.current = null;
         }
 
         const page = await pdfDoc.getPage(pageNumber);
@@ -173,9 +187,26 @@ const LazyPdfPage = memo(function LazyPdfPage({
         });
         renderTaskRef.current = task;
         await task.promise;
-        if (isCurrent) setRendered(true);
+        if (!isCurrent) return;
+        setRendered(true);
+
+        // Render TextLayer for in-app native selection & copy
+        if (pdfjs?.TextLayer && textLayerRef.current) {
+          textLayerRef.current.replaceChildren();
+          const textContentSource = page.streamTextContent
+            ? page.streamTextContent()
+            : await page.getTextContent();
+
+          const textLayer = new pdfjs.TextLayer({
+            textContentSource,
+            container: textLayerRef.current,
+            viewport,
+          });
+          textLayerTaskRef.current = textLayer;
+          await textLayer.render();
+        }
       } catch (err: any) {
-        if (err?.name !== "RenderingCancelledException") {
+        if (err?.name !== "RenderingCancelledException" && err?.name !== "AbortException") {
           console.error(`Error rendering page ${pageNumber}:`, err);
         }
       }
@@ -185,20 +216,33 @@ const LazyPdfPage = memo(function LazyPdfPage({
     return () => {
       isCurrent = false;
       if (renderTaskRef.current) {
-        renderTaskRef.current.cancel();
+        try {
+          renderTaskRef.current.cancel();
+        } catch {}
+      }
+      if (textLayerTaskRef.current) {
+        try {
+          textLayerTaskRef.current.cancel();
+        } catch {}
       }
     };
-  }, [shouldRender, pdfDoc, pageNumber, targetWidth]);
+  }, [shouldRender, pdfDoc, pdfjs, pageNumber, targetWidth]);
 
   return (
     <div
       ref={containerRef}
       id={`pdf-page-${pageNumber}`}
       style={{ width: `${targetWidth}px`, minHeight: `${targetHeight}px` }}
-      className="relative mx-auto my-3 sm:my-5 rounded-xs shadow-md border border-border-subtle bg-white overflow-hidden transition-all"
+      className="relative mx-auto my-3 sm:my-5 rounded-xs shadow-md border border-border-subtle bg-white overflow-hidden transition-all select-text"
     >
       {shouldRender ? (
-        <canvas ref={canvasRef} className="block w-full h-auto select-text" />
+        <>
+          <canvas ref={canvasRef} className="block w-full h-auto pointer-events-none select-none" />
+          <div
+            ref={textLayerRef}
+            className="textLayer absolute inset-0 select-text pointer-events-auto"
+          />
+        </>
       ) : null}
 
       {!rendered ? (
@@ -219,6 +263,7 @@ function ContinuousPdfViewer() {
 
   // Document state
   const [pdfDoc, setPdfDoc] = useState<any>(null);
+  const [pdfjsLib, setPdfjsLib] = useState<any>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
   const [aspectRatio, setAspectRatio] = useState<number>(0.75); // standard letter/A4 portrait
@@ -234,6 +279,15 @@ function ContinuousPdfViewer() {
   const [scope, setScope] = useState<Scope>("page");
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [selectedText, setSelectedText] = useState<string | null>(null);
+
+  const {
+    isWide: isSidebarWide,
+    isDragging: isSidebarDragging,
+    handlePointerDown: handleSidebarResize,
+    resetWidth: resetSidebarWidth,
+    toggleWide: toggleSidebarWide,
+    asideStyle,
+  } = useResizableSidebar();
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -256,6 +310,7 @@ function ContinuousPdfViewer() {
         const doc = await loadingTask.promise;
         if (!active) return;
 
+        setPdfjsLib(pdfjs);
         setPdfDoc(doc);
         setNumPages(doc.numPages);
 
@@ -296,9 +351,16 @@ function ContinuousPdfViewer() {
 
   useEffect(() => {
     updateLayoutWidth();
-    window.addEventListener("resize", updateLayoutWidth);
-    return () => window.removeEventListener("resize", updateLayoutWidth);
-  }, [updateLayoutWidth, ask]);
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    const ro = new ResizeObserver(() => {
+      updateLayoutWidth();
+    });
+    ro.observe(el);
+
+    return () => ro.disconnect();
+  }, [updateLayoutWidth]);
 
   // 3. Scroll to specific page
   const scrollToPage = (targetPage: number) => {
@@ -316,15 +378,12 @@ function ContinuousPdfViewer() {
     setPageInput(String(page));
   }, []);
 
-  // 4. Capture Text Selection for AI Ask Context
+  // 4. Capture Text Selection for AI Ask Context & Clipboard
   useEffect(() => {
     const onSelectionChange = () => {
       const sel = window.getSelection();
-      if (!sel || sel.isCollapsed) return;
-      const text = sel.toString().trim();
-      if (text.length > 3) {
-        setSelectedText(text);
-      }
+      const text = sel ? sel.toString().trim() : "";
+      setSelectedText(text.length > 1 ? text : null);
     };
     document.addEventListener("selectionchange", onSelectionChange);
     return () => document.removeEventListener("selectionchange", onSelectionChange);
@@ -412,10 +471,7 @@ function ContinuousPdfViewer() {
         {/* Continuous Scroll Container */}
         <main
           ref={scrollContainerRef}
-          className={cn(
-            "flex-1 overflow-y-auto overflow-x-hidden p-2 sm:p-6 bg-surface/50 transition-all flex flex-col items-center",
-            ask && "lg:mr-[420px]"
-          )}
+          className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden p-2 sm:p-6 bg-surface/50 flex flex-col items-center"
         >
           {loading ? (
             <div className="flex flex-col items-center justify-center my-auto py-20 gap-3 text-muted-foreground">
@@ -428,6 +484,7 @@ function ContinuousPdfViewer() {
                 <LazyPdfPage
                   key={pageNum}
                   pdfDoc={pdfDoc}
+                  pdfjs={pdfjsLib}
                   pageNumber={pageNum}
                   baseWidth={baseWidth}
                   scale={scale}
@@ -438,85 +495,144 @@ function ContinuousPdfViewer() {
             </div>
           )}
 
-          {/* Floating Selection Tooltip */}
+          {/* Floating Selection Action Toolbar */}
           {selectedText && !ask ? (
-            <div className="fixed bottom-20 z-30 animate-in fade-in slide-in-from-bottom-2">
-              <Button
-                size="sm"
-                variant="primary"
-                onClick={openAskForSelection}
-                className="gap-1.5 shadow-lg border border-accent/20"
-              >
-                <MessageSquareQuote size={14} strokeWidth={1.75} />
-                Ask AI about selected text
-              </Button>
+            <div
+              className="fixed bottom-16 left-1/2 -translate-x-1/2 z-30 animate-in fade-in slide-in-from-bottom-2"
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              <div className="flex items-center gap-1.5 rounded-sm border border-border bg-reading/95 backdrop-blur-sm p-1.5 shadow-panel">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={openAskForSelection}
+                  className="gap-1.5 text-xs font-medium"
+                >
+                  <MessageSquareQuote size={14} strokeWidth={1.75} />
+                  Ask AI
+                </Button>
+                <Button
+                  size="sm"
+                  variant="tertiary"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(selectedText);
+                    toast.success("Copied to clipboard");
+                    setSelectedText(null);
+                    window.getSelection()?.removeAllRanges();
+                  }}
+                  className="gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <Copy size={13} strokeWidth={1.75} />
+                  Copy
+                </Button>
+                <IconButton
+                  label="Dismiss selection"
+                  onClick={() => {
+                    setSelectedText(null);
+                    window.getSelection()?.removeAllRanges();
+                  }}
+                >
+                  <X size={15} strokeWidth={1.75} />
+                </IconButton>
+              </div>
+            </div>
+          ) : null}
+
+          {/* Floating Quick Navigation Pill - Centered directly over book area */}
+          {!loading && numPages > 0 ? (
+            <div className="sticky bottom-4 z-20 mt-auto flex justify-center pointer-events-none pb-2">
+              <nav className="pointer-events-auto flex items-center gap-2 bg-background/95 backdrop-blur-sm border border-border shadow-lg rounded-full px-3 py-1.5 text-xs">
+                <IconButton
+                  label="Previous Page"
+                  onClick={() => scrollToPage(activePage - 1)}
+                  disabled={activePage <= 1}
+                >
+                  <ChevronUp size={16} strokeWidth={2} />
+                </IconButton>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const p = parseInt(pageInput, 10);
+                    if (!isNaN(p)) scrollToPage(p);
+                  }}
+                  className="flex items-center gap-1 font-mono"
+                >
+                  <input
+                    type="text"
+                    value={pageInput}
+                    onChange={(e) => setPageInput(e.target.value)}
+                    onBlur={() => setPageInput(String(activePage))}
+                    className="w-10 text-center bg-surface border border-border-subtle rounded-xs px-1 py-0.5 text-xs text-foreground focus:outline-none focus:border-accent"
+                  />
+                  <span className="text-faint">/ {numPages}</span>
+                </form>
+
+                <IconButton
+                  label="Next Page"
+                  onClick={() => scrollToPage(activePage + 1)}
+                  disabled={activePage >= numPages}
+                >
+                  <ChevronDown size={16} strokeWidth={2} />
+                </IconButton>
+              </nav>
             </div>
           ) : null}
         </main>
 
-        {/* Floating Quick Navigation Pill */}
-        {!loading && numPages > 0 ? (
-          <nav className="fixed bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-background/95 backdrop-blur-sm border border-border shadow-lg rounded-full px-3 py-1.5 text-xs">
-            <IconButton
-              label="Previous Page"
-              onClick={() => scrollToPage(activePage - 1)}
-              disabled={activePage <= 1}
-            >
-              <ChevronUp size={16} strokeWidth={2} />
-            </IconButton>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const p = parseInt(pageInput, 10);
-                if (!isNaN(p)) scrollToPage(p);
-              }}
-              className="flex items-center gap-1 font-mono"
-            >
-              <input
-                type="text"
-                value={pageInput}
-                onChange={(e) => setPageInput(e.target.value)}
-                onBlur={() => setPageInput(String(activePage))}
-                className="w-10 text-center bg-surface border border-border-subtle rounded-xs px-1 py-0.5 text-xs text-foreground focus:outline-none focus:border-accent"
-              />
-              <span className="text-faint">/ {numPages}</span>
-            </form>
-
-            <IconButton
-              label="Next Page"
-              onClick={() => scrollToPage(activePage + 1)}
-              disabled={activePage >= numPages}
-            >
-              <ChevronDown size={16} strokeWidth={2} />
-            </IconButton>
-          </nav>
-        ) : null}
-
-        {/* Integrated Ask AI Sidebar (Desktop Docked, Mobile Drawer) */}
+        {/* Integrated Ask AI Sidebar (Docked desktop flex column, mobile drawer) */}
         {ask ? (
-          <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[420px] flex-col border-l border-border bg-background shadow-panel animate-in slide-in-from-right duration-200">
-            <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
-              <div className="flex items-center gap-2">
-                <MessageSquareQuote size={16} className="text-accent" />
-                <span className="text-sm font-medium text-foreground">Ask AI</span>
-              </div>
-              <IconButton label="Close Ask panel" onClick={() => setAsk(false)}>
-                <X size={16} strokeWidth={1.75} />
-              </IconButton>
-            </header>
-            <div className="flex-1 overflow-y-auto p-4">
-              <AskBody
-                scope={scope}
-                setScope={setScope}
-                contextDetail={contextDetail}
-                {...(selectedText && scope === "selection" ? { contextPassage: selectedText } : {})}
-                answer={answer}
-                setAnswer={setAnswer}
-                availableScopes={["selection", "page", "book", "library"]}
+          <>
+            {/* Mobile backdrop */}
+            <div
+              className="lg:hidden fixed inset-0 z-40 bg-foreground/20 backdrop-blur-xs"
+              onClick={() => setAsk(false)}
+            />
+            <aside
+              style={asideStyle}
+              className={cn(
+                "fixed inset-y-0 right-0 z-50 flex w-full max-w-full sm:max-w-[420px] flex-col border-l border-border bg-background shadow-panel",
+                "lg:relative lg:inset-auto lg:z-10 lg:h-full lg:shrink-0 lg:max-w-none lg:shadow-none",
+                "transition-[width] duration-75 ease-out",
+                isSidebarDragging && "select-none transition-none"
+              )}
+            >
+              <SidebarResizeHandle
+                onPointerDown={handleSidebarResize}
+                onDoubleClick={resetSidebarWidth}
+                isDragging={isSidebarDragging}
               />
-            </div>
-          </aside>
+              <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3 shrink-0">
+                <div className="flex items-center gap-2">
+                  <MessageSquareQuote size={16} className="text-accent" />
+                  <span className="text-sm font-medium text-foreground">Ask AI</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <IconButton
+                    label={isSidebarWide ? "Collapse width" : "Expand width"}
+                    onClick={toggleSidebarWide}
+                    className="hidden lg:inline-flex"
+                  >
+                    {isSidebarWide ? <Minimize2 size={15} strokeWidth={1.75} /> : <Maximize2 size={15} strokeWidth={1.75} />}
+                  </IconButton>
+                  <IconButton label="Close Ask panel" onClick={() => setAsk(false)}>
+                    <X size={16} strokeWidth={1.75} />
+                  </IconButton>
+                </div>
+              </header>
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                <AskBody
+                  scope={scope}
+                  setScope={setScope}
+                  contextDetail={contextDetail}
+                  {...(selectedText && scope === "selection" ? { contextPassage: selectedText } : {})}
+                  answer={answer}
+                  setAnswer={setAnswer}
+                  availableScopes={["selection", "page", "book", "library"]}
+                />
+              </div>
+            </aside>
+          </>
         ) : null}
       </div>
     </div>

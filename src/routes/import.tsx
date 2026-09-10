@@ -13,11 +13,13 @@ import {
   Sparkles,
   UploadCloud,
   X,
+  XCircle,
 } from "lucide-react";
 import { AppShell } from "@/components/app/AppShell";
 import { Button, Page, PageHeader, SectionTitle } from "@/components/app/primitives";
 import { getLibrary, titleAndAuthorFromId, type LibraryBook } from "@/lib/books";
 import {
+  cancelJobApi,
   pollJobApi,
   uploadBookApi,
   type IndexingJobResponse,
@@ -91,6 +93,7 @@ function ImportPage() {
 
   // Job progress states
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [currentJob, setCurrentJob] = useState<IndexingJobResponse | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -143,6 +146,7 @@ function ImportPage() {
     if (!file || !title.trim()) return;
 
     setIsSubmitting(true);
+    setIsCancelling(false);
     setErrorMessage(null);
     setCurrentJob(null);
 
@@ -169,22 +173,42 @@ function ImportPage() {
           if (job.status === "completed") {
             clearInterval(pollInterval);
             setIsSubmitting(false);
+            setIsCancelling(false);
             // Invalidate React Query cache so library auto-updates
             queryClient.invalidateQueries({ queryKey: ["library"] });
+          } else if (job.status === "cancelled") {
+            clearInterval(pollInterval);
+            setIsSubmitting(false);
+            setIsCancelling(false);
           } else if (job.status === "failed") {
             clearInterval(pollInterval);
             setIsSubmitting(false);
+            setIsCancelling(false);
             setErrorMessage(job.error_message || "Ingestion pipeline encountered an error.");
           }
         } catch (pollErr: any) {
           clearInterval(pollInterval);
           setIsSubmitting(false);
+          setIsCancelling(false);
           setErrorMessage(pollErr.message || "Failed polling job status.");
         }
       }, 1200);
     } catch (err: any) {
       setIsSubmitting(false);
+      setIsCancelling(false);
       setErrorMessage(err.message || "Upload failed. Check server connection.");
+    }
+  };
+
+  const handleCancelJob = async () => {
+    if (!currentJob || isCancelling) return;
+    setIsCancelling(true);
+    try {
+      const updated = await cancelJobApi(currentJob.job_id);
+      setCurrentJob(updated);
+    } catch (err: any) {
+      console.error("Failed to signal cancellation:", err);
+      setIsCancelling(false);
     }
   };
 
@@ -196,10 +220,13 @@ function ImportPage() {
     setCurrentJob(null);
     setErrorMessage(null);
     setIsSubmitting(false);
+    setIsCancelling(false);
     setIngestionMode("index");
   };
 
   const isCompleted = currentJob?.status === "completed";
+  const isCancelled = currentJob?.status === "cancelled";
+  const isCancellingStage = currentJob?.status === "cancelling" || isCancelling;
 
   return (
     <AppShell>
@@ -210,13 +237,19 @@ function ImportPage() {
         />
 
         <div className="max-w-2xl py-6">
-          {/* Progress / Success View */}
-          {(isSubmitting || isCompleted) && currentJob ? (
+          {/* Progress / Success / Cancelled View */}
+          {(isSubmitting || isCompleted || isCancelled || isCancellingStage) && currentJob ? (
             <div className="space-y-6 rounded-md border border-border bg-surface p-6 shadow-sm">
               <div className="flex items-center justify-between">
                 <div>
                   <h2 className="text-base font-medium text-foreground">
-                    {isCompleted ? "Ingestion Complete!" : "Processing Document..."}
+                    {isCompleted
+                      ? "Ingestion Complete!"
+                      : isCancelled
+                        ? "Indexing Cancelled & Rolled Back"
+                        : isCancellingStage
+                          ? "Cancelling & Rolling Back..."
+                          : "Processing Document..."}
                   </h2>
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     Job ID: <span className="font-mono">{currentJob.job_id}</span>
@@ -225,6 +258,14 @@ function ImportPage() {
                 {isCompleted ? (
                   <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
                     <CheckCircle2 size={14} /> Ready to Read
+                  </span>
+                ) : isCancelled ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                    <XCircle size={14} /> Cancelled & Rolled Back
+                  </span>
+                ) : isCancellingStage ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                    <Loader2 size={14} className="animate-spin" /> Rolling Back...
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
@@ -237,22 +278,51 @@ function ImportPage() {
               <div className="space-y-1.5">
                 <div className="flex justify-between text-xs text-muted-foreground">
                   <span>
-                    {STAGE_DESCRIPTIONS[currentJob.current_stage] || currentJob.current_stage}
+                    {isCancelled
+                      ? "Indexing was aborted. Any uncommitted data has been rolled back."
+                      : isCancellingStage
+                        ? "Purging uncommitted vector embeddings from Qdrant Cloud..."
+                        : STAGE_DESCRIPTIONS[currentJob.current_stage] || currentJob.current_stage}
                   </span>
                   <span className="font-medium text-foreground">
-                    {currentJob.progress_percent}%
+                    {isCancelled ? 0 : currentJob.progress_percent}%
                   </span>
                 </div>
                 <div className="h-2 w-full overflow-hidden rounded-full bg-border-subtle">
                   <div
                     className={cn(
                       "h-full transition-all duration-500 ease-out",
-                      isCompleted ? "bg-emerald-500" : "bg-accent",
+                      isCompleted
+                        ? "bg-emerald-500"
+                        : isCancelled
+                          ? "bg-muted-foreground/30"
+                          : isCancellingStage
+                            ? "bg-amber-500 animate-pulse"
+                            : "bg-accent",
                     )}
-                    style={{ width: `${Math.max(currentJob.progress_percent, 5)}%` }}
+                    style={{
+                      width: isCancelled
+                        ? "0%"
+                        : `${Math.max(currentJob.progress_percent, 5)}%`,
+                    }}
                   />
                 </div>
               </div>
+
+              {/* Cancellation Guarantee Notice */}
+              {isCancelled && (
+                <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-4 text-xs">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle size={16} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                    <div>
+                      <p className="font-medium text-foreground">Zero Partial Indexing Guarantee</p>
+                      <p className="mt-1 text-muted-foreground leading-relaxed">
+                        The indexing pipeline aborted immediately. Any uncommitted vector embeddings generated during this run were automatically deleted from Qdrant Cloud. Your existing catalog and prior book versions remain 100% intact.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Completed Metrics Summary */}
               {isCompleted && (
@@ -279,22 +349,54 @@ function ImportPage() {
               )}
 
               {/* Action Buttons */}
-              <div className="flex items-center justify-end gap-3 pt-2">
+              <div className="flex items-center justify-between pt-2">
                 {isCompleted ? (
                   <>
-                    <Button variant="ghost" onClick={handleReset}>
-                      Import Another
-                    </Button>
-                    <Link to="/book/$bookId" params={{ bookId: currentJob.book_id }}>
-                      <Button variant="primary">
-                        <BookOpen size={14} /> Open Book
+                    <div />
+                    <div className="flex items-center gap-3">
+                      <Button variant="ghost" onClick={handleReset}>
+                        Import Another
                       </Button>
-                    </Link>
+                      <Link to="/book/$bookId" params={{ bookId: currentJob.book_id }}>
+                        <Button variant="primary">
+                          <BookOpen size={14} /> Open Book
+                        </Button>
+                      </Link>
+                    </div>
+                  </>
+                ) : isCancelled ? (
+                  <>
+                    <div />
+                    <Button variant="outline" onClick={handleReset}>
+                      <RefreshCw size={13} className="mr-1.5" /> Import Again
+                    </Button>
                   </>
                 ) : (
-                  <p className="text-xs text-muted-foreground">
-                    You can safely stay on this page while embeddings are generated.
-                  </p>
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      {isCancellingStage
+                        ? "Aborting pipeline and cleaning up vectors..."
+                        : "You can safely stay on this page or cancel at any time."}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCancelJob}
+                      disabled={isCancellingStage}
+                      className="border-amber-500/30 text-amber-700 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-200"
+                    >
+                      {isCancellingStage ? (
+                        <>
+                          <Loader2 size={13} className="mr-1.5 animate-spin" /> Cancelling...
+                        </>
+                      ) : (
+                        <>
+                          <XCircle size={13} className="mr-1.5" /> Cancel Indexing
+                        </>
+                      )}
+                    </Button>
+                  </>
                 )}
               </div>
             </div>

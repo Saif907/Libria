@@ -202,16 +202,16 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
+    <header className="mb-6 sm:mb-8 flex flex-wrap items-end justify-between gap-3 sm:gap-4">
       <div>
-        <h1 className="text-3xl font-semibold tracking-[-0.015em] text-foreground">
+        <h1 className="text-2xl sm:text-3xl font-semibold tracking-[-0.015em] text-foreground">
           {title}
         </h1>
         {meta ? (
-          <p className="mt-1.5 text-sm text-muted-foreground">{meta}</p>
+          <p className="mt-1 text-xs sm:text-sm text-muted-foreground">{meta}</p>
         ) : null}
       </div>
-      {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
     </header>
   );
 }
@@ -226,7 +226,7 @@ export function Page({
   return (
     <div
       className={cn(
-        "mx-auto px-6 py-10 sm:px-10",
+        "mx-auto px-4 py-6 sm:px-10 sm:py-10",
         width === "page" ? "max-w-[1240px]" : "max-w-[900px]",
       )}
     >
