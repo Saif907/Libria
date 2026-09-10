@@ -40,13 +40,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // 1. Resolve the existing session (from localStorage / cookies).
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setState({
-        user: session?.user ?? null,
-        session,
-        loading: false,
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        setState({
+          user: session?.user ?? null,
+          session,
+          loading: false,
+        });
+      })
+      .catch((err) => {
+        console.warn("Could not get Supabase session:", err);
+        setState({
+          user: null,
+          session: null,
+          loading: false,
+        });
       });
-    });
 
     // 2. Keep state in sync with every auth event (sign-in, sign-out,
     //    token refresh, etc.).

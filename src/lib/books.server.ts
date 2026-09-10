@@ -97,24 +97,29 @@ export async function loadLibrary(): Promise<LibraryBook[]> {
  * Loads the library instantly in one single call via the master catalog.json file.
  */
 async function fetchLibrary(): Promise<LibraryBook[]> {
-  const { ownerUid } = supabaseStorageConfig();
-  const catalog = await loadCatalog(ownerUid);
+  try {
+    const { ownerUid } = supabaseStorageConfig();
+    const catalog = await loadCatalog(ownerUid);
 
-  // Resiliently support both { books: [...] } envelope and raw array [...]
-  const rawList: CatalogBook[] = Array.isArray(catalog)
-    ? (catalog as unknown as CatalogBook[])
-    : Array.isArray((catalog as any)?.books)
-      ? (catalog as any).books
-      : [];
+    // Resiliently support both { books: [...] } envelope and raw array [...]
+    const rawList: CatalogBook[] = Array.isArray(catalog)
+      ? (catalog as unknown as CatalogBook[])
+      : Array.isArray((catalog as any)?.books)
+        ? (catalog as any).books
+        : [];
 
-  if (rawList.length === 0) {
-    console.warn("No catalog.json found or catalog.books is empty.");
+    if (rawList.length === 0) {
+      console.warn("No catalog.json found or catalog.books is empty.");
+      return [];
+    }
+
+    return rawList
+      .map(catalogBookToLibraryBook)
+      .sort((a, b) => a.title.localeCompare(b.title));
+  } catch (err) {
+    console.warn("fetchLibrary failed to load from Supabase Storage (returning [] to prevent SSR crash):", err);
     return [];
   }
-
-  return rawList
-    .map(catalogBookToLibraryBook)
-    .sort((a, b) => a.title.localeCompare(b.title));
 }
 
 async function findBook(bookId: string): Promise<LibraryBook | undefined> {
