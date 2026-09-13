@@ -284,7 +284,7 @@ export function AgentSettingsModal({ open, onOpenChange }: AgentSettingsModalPro
                   <div className="space-y-0.5">
                     <span className="text-xs font-medium text-foreground flex items-center gap-1.5">
                       <Brain size={14} className="text-accent" />
-                      Always Enable Deep Thinking (ReAct Trace)
+                      Always Enable Deep Thinking
                     </span>
                     <p className="text-2xs text-muted-foreground">
                       Displays internal chain-of-thought, tool calls, and observations before final answers.

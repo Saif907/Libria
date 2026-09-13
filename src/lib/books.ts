@@ -67,6 +67,11 @@ export type ChapterContent = {
   words: number;
 };
 
+export type BookChapterWithContent = BookChapter & {
+  index: number;
+  markdown: string;
+};
+
 /* ---------- Category labels ---------- */
 
 /**
@@ -247,4 +252,15 @@ export const getPdfUrl = createServerFn({ method: "GET" })
   .handler(async ({ data }): Promise<string | null> => {
     const { loadPdfUrl } = await import("./books.server");
     return loadPdfUrl(data.bookId);
+  });
+
+export const getBookFullContent = createServerFn({ method: "GET" })
+  .validator(parseBookId)
+  .handler(async ({ data }): Promise<{
+    book: LibraryBook;
+    chapters: BookChapterWithContent[];
+    totalWords: number;
+  } | null> => {
+    const { loadBookFullContent } = await import("./books.server");
+    return loadBookFullContent(data.bookId);
   });

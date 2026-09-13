@@ -14,6 +14,7 @@ import {
 } from "@/lib/agent-settings";
 import { getLibrary, type LibraryBook } from "@/lib/books";
 import { type Citation } from "@/lib/ask-data";
+import { askLibriaApi } from "@/lib/api";
 import type { AttachedPageContext } from "@/components/app/AskPanel";
 import { cn } from "@/lib/utils";
 import {
@@ -42,6 +43,8 @@ import {
   Zap,
   CheckCircle2,
   ArrowDown,
+  ChevronDown,
+  ChevronUp,
   Quote,
   X,
 } from "lucide-react";
@@ -87,6 +90,7 @@ interface ChatMessage {
   personalContextUsed?: boolean;
   notesAccessed?: boolean;
   reactLoop?: ReActIteration[];
+  reasoning?: string;
   isStreaming?: boolean;
   citations?: Citation[];
   takeaways?: string[];
@@ -122,6 +126,389 @@ function saveSessions(sessions: ChatSession[]): void {
   } catch (err) {
     console.error("Failed to save chat sessions", err);
   }
+}
+
+/**
+ * Safely parses and renders inline code (`text`), bold (**text**), and italic (*text*) markers
+ */
+function renderInlineFormatting(text: string) {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return (
+        <strong key={i} className="font-semibold text-foreground">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith("*") && part.endsWith("*")) {
+      return (
+        <em key={i} className="italic text-foreground/90">
+          {part.slice(1, -1)}
+        </em>
+      );
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code
+          key={i}
+          className="font-mono text-xs px-1.5 py-0.5 rounded-xs bg-surface border border-border/70 text-accent font-medium"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
+}
+
+/**
+ * Enhanced high-readability typography formatter for AI answers
+ * Features 16px/16.5px font size, relaxed 1.85 line-height, proper paragraph separation, and formatted headings
+ */
+function FormattedProseContent({
+  content,
+  isStreaming,
+}: {
+  content: string | string[];
+  isStreaming?: boolean;
+}) {
+  const text = Array.isArray(content) ? content.join("\n\n") : content;
+  const blocks = useMemo(() => text.split(/\n\n+/), [text]);
+
+  return (
+    <div className="space-y-3.5 font-sans text-[15px] sm:text-[15.5px] leading-[1.7] sm:leading-[1.75] text-foreground/95 select-text tracking-normal">
+      {blocks.map((block, idx) => {
+        const trimmed = block.trim();
+        if (!trimmed) return null;
+
+        // Heading 4 (###)
+        if (trimmed.startsWith("### ")) {
+          return (
+            <h4 key={idx} className="font-semibold text-sm sm:text-[15px] text-accent mt-3.5 mb-1">
+              {renderInlineFormatting(trimmed.replace(/^###\s+/, ""))}
+            </h4>
+          );
+        }
+        // Heading 3 (##)
+        if (trimmed.startsWith("## ")) {
+          return (
+            <h3 key={idx} className="font-semibold text-base sm:text-lg text-foreground mt-4 mb-1.5">
+              {renderInlineFormatting(trimmed.replace(/^##\s+/, ""))}
+            </h3>
+          );
+        }
+        // Heading 2 (#)
+        if (trimmed.startsWith("# ")) {
+          return (
+            <h2 key={idx} className="font-bold text-lg sm:text-xl text-foreground mt-4.5 mb-2 tracking-tight">
+              {renderInlineFormatting(trimmed.replace(/^#\s+/, ""))}
+            </h2>
+          );
+        }
+
+        // Bullet or numbered lists
+        const lines = trimmed.split("\n");
+        const isList = lines.length > 1 && lines.every((l) => /^\s*([•\-\*]|\d+[\.\)])\s/.test(l));
+        if (isList) {
+          return (
+            <ul key={idx} className="space-y-2 pl-2 sm:pl-3 my-2.5 list-none">
+              {lines.map((line, lIdx) => (
+                <li key={lIdx} className="flex items-start gap-2.5">
+                  <span className="text-accent font-bold mt-1 shrink-0 text-xs select-none">•</span>
+                  <span className="flex-1 leading-[1.7] sm:leading-[1.75] text-foreground/90">
+                    {renderInlineFormatting(line.replace(/^\s*([•\-\*]|\d+[\.\)])\s+/, ""))}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          );
+        }
+
+        return (
+          <p key={idx} className="leading-[1.7] sm:leading-[1.75]">
+            {renderInlineFormatting(trimmed)}
+            {isStreaming && idx === blocks.length - 1 ? (
+              <span className="inline-block w-1.5 h-4 bg-accent ml-1.5 animate-pulse align-middle rounded-xs" />
+            ) : null}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Modular Chat Message Bubble with collapsible Reasoning and Citations dropdowns
+ */
+function ChatMessageItem({
+  msg,
+  books,
+}: {
+  msg: ChatMessage;
+  books: LibraryBook[];
+}) {
+  const [showReasoning, setShowReasoning] = useState(false);
+  const [showCitations, setShowCitations] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const handleCopy = () => {
+    const text = Array.isArray(msg.content) ? msg.content.join("\n\n") : msg.content;
+    void navigator.clipboard?.writeText(text);
+    setCopied(true);
+    toast.success("Copied answer to clipboard");
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleSave = () => {
+    setSaved(true);
+    toast.success("Saved advice to your reading notes");
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  if (msg.role === "user") {
+    return (
+      <div className="flex items-start justify-end gap-3 animate-in fade-in duration-200">
+        <div className="max-w-[85%] sm:max-w-[75%] space-y-1.5 text-right">
+          <div className="inline-block rounded-2xl sm:rounded-3xl bg-surface border border-border/80 px-4 py-2.5 sm:py-3 text-[14.5px] sm:text-[15px] text-foreground shadow-2xs leading-[1.65] text-left">
+            {/* Attached Page Photo Badge */}
+            {msg.attachedPage ? (
+              <div className="mb-2.5 flex items-center gap-2 rounded-sm border border-accent/30 bg-background/80 p-2 text-2xs text-muted-foreground">
+                <div className="h-10 w-8 rounded-xs overflow-hidden border border-border bg-surface shrink-0 shadow-2xs">
+                  <img
+                    src={msg.attachedPage.imageUrl}
+                    alt={`Page ${msg.attachedPage.pageNumber}`}
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+                <div className="min-w-0">
+                  <p className="font-mono font-medium text-accent">Page {msg.attachedPage.pageNumber}</p>
+                  {msg.attachedPage.bookTitle ? (
+                    <p className="truncate text-3xs text-faint max-w-[180px]">{msg.attachedPage.bookTitle}</p>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
+            {/* Attached Excerpt Badge */}
+            {msg.contextPassage ? (
+              <div className="mb-2.5 flex items-start gap-2 rounded-xs border-l-2 border-accent bg-background/80 px-2.5 py-1.5 text-xs text-muted-foreground">
+                <Quote size={12} className="shrink-0 text-accent mt-0.5" />
+                <p className="line-clamp-2 italic font-serif">“{msg.contextPassage}”</p>
+              </div>
+            ) : null}
+
+            {typeof msg.content === "string" ? msg.content : msg.content.join("\n\n")}
+          </div>
+
+          {/* Tag badges */}
+          {((msg.taggedBooks && msg.taggedBooks.length > 0) ||
+            (msg.taggedCategories && msg.taggedCategories.length > 0)) && (
+            <div className="flex flex-wrap items-center justify-end gap-1.5 text-2xs font-mono text-muted-foreground pt-0.5">
+              {msg.taggedBooks?.map((bid) => {
+                const b = books.find((x) => x.id === bid);
+                return (
+                  <span
+                    key={bid}
+                    className="inline-flex items-center gap-1 rounded-full border border-border bg-reading px-2 py-0.5 text-2xs"
+                  >
+                    <BookOpen size={10} className="text-accent" />
+                    <span>{b?.title || bid}</span>
+                  </span>
+                );
+              })}
+              {msg.taggedCategories?.map((cat) => (
+                <span
+                  key={cat}
+                  className="inline-flex items-center gap-1 rounded-full border border-border bg-reading px-2 py-0.5 text-2xs capitalize"
+                >
+                  <Hash size={10} className="text-accent" />
+                  <span>{cat.replace(/_/g, " ")}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <span className="block text-2xs text-faint font-mono pr-1">
+            {msg.timestamp}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // Assistant Message
+  return (
+    <div className="w-full space-y-3.5 animate-in fade-in duration-200">
+
+        {/* Collapsible Reasoning / Thinking Trace (Hidden by Default) */}
+        {((msg.reactLoop && msg.reactLoop.length > 0) || msg.reasoning) && (
+          <div className="pt-0.5">
+            <button
+              type="button"
+              onClick={() => setShowReasoning(!showReasoning)}
+              className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-surface/70 hover:bg-surface px-3 py-1.5 text-2xs font-mono text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-2xs"
+            >
+              <Brain size={12} className="text-accent" />
+              <span>
+                {msg.reactLoop && msg.reactLoop.length > 0
+                  ? `${msg.reactLoop.length} thought ${msg.reactLoop.length === 1 ? "step" : "steps"}`
+                  : "Reasoning"}
+              </span>
+              <ChevronDown
+                size={12}
+                className={cn("transition-transform duration-200 text-faint", showReasoning && "rotate-180")}
+              />
+            </button>
+
+            {showReasoning && (
+              <div className="mt-3 space-y-2.5 border-l-2 border-accent/40 bg-surface/35 p-3 rounded-r-xs animate-in fade-in duration-150">
+                <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-accent flex items-center gap-1.5">
+                  <Brain size={12} />
+                  <span>Thought Trace & Retrieval</span>
+                </p>
+
+                {msg.reasoning && (
+                  <p className="italic text-foreground/85 leading-relaxed font-serif text-xs">
+                    "{msg.reasoning}"
+                  </p>
+                )}
+
+                {msg.reactLoop?.map((step) => (
+                  <div key={step.id} className="space-y-1 text-xs text-muted-foreground">
+                    <p className="italic text-foreground/85 leading-relaxed font-serif">
+                      "{step.thought}"
+                    </p>
+
+                    {step.action && (
+                      <div className="flex items-center gap-1.5 text-2xs font-mono text-accent">
+                        <Zap size={11} />
+                        <span>Invoked tool: {step.action.tool}()</span>
+                      </div>
+                    )}
+
+                    {step.observation && (
+                      <div className="text-2xs text-muted-foreground bg-surface/70 border border-border-subtle p-2 rounded-xs whitespace-pre-line font-mono">
+                        {step.observation}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Enhanced High-Readability Prose Content */}
+        <FormattedProseContent content={msg.content} isStreaming={msg.isStreaming} />
+
+        {/* Action Protocol (If Coach mode) */}
+        {msg.actionProtocol && msg.actionProtocol.length > 0 && (
+          <div className="space-y-2 pt-2">
+            <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-foreground flex items-center gap-1.5">
+              <Zap size={12} className="text-accent" />
+              <span>Action Protocol</span>
+            </p>
+            <div className="space-y-1.5">
+              {msg.actionProtocol.map((step, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-start gap-2.5 text-sm text-foreground bg-surface/40 p-2.5 rounded-sm border border-border-subtle"
+                >
+                  <CheckCircle2 size={14} className="text-accent shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{step}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Key Takeaways */}
+        {msg.takeaways && msg.takeaways.length > 0 && (
+          <div className="space-y-2 pt-2">
+            <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
+              Key Takeaways
+            </p>
+            <ul className="space-y-1.5 text-sm text-muted-foreground list-disc list-inside">
+              {msg.takeaways.map((t, idx) => (
+                <li key={idx} className="leading-relaxed">
+                  {t}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Collapsible Literature Citations (Hidden by Default) */}
+        {msg.citations && msg.citations.length > 0 && (
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => setShowCitations(!showCitations)}
+              className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-surface/70 hover:bg-surface px-3 py-1.5 text-2xs font-mono text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-2xs"
+            >
+              <Quote size={11} className="text-accent" />
+              <span>{msg.citations.length} {msg.citations.length === 1 ? "Citation" : "Citations"}</span>
+              <ChevronDown
+                size={12}
+                className={cn("transition-transform duration-200 text-faint", showCitations && "rotate-180")}
+              />
+            </button>
+
+            {showCitations && (
+              <div className="mt-3 space-y-2 pt-1 animate-in fade-in duration-150">
+                <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-faint flex items-center gap-1.5">
+                  <Quote size={11} />
+                  <span>Literature Grounding</span>
+                </p>
+                <div className="grid gap-2">
+                  {msg.citations.map((c, idx) => {
+                    const b = books.find((x) => x.id === c.bookId);
+                    return (
+                      <div
+                        key={idx}
+                        className="p-3 rounded-sm border border-border bg-surface/40 space-y-1 text-2xs"
+                      >
+                        <div className="flex items-center justify-between font-mono text-foreground font-medium">
+                          <span>{b?.title || c.bookId}</span>
+                          <span className="text-faint">{c.chapter}</span>
+                        </div>
+                        <p className="font-serif italic text-muted-foreground leading-relaxed">
+                          “{c.passage}”
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Message Actions (ChatGPT-style clean action row) */}
+        <div className="flex items-center gap-1 pt-1 text-faint">
+          <button
+            type="button"
+            onClick={handleCopy}
+            title={copied ? "Copied" : "Copy"}
+            className="inline-flex items-center gap-1 text-2xs text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded-sm hover:bg-surface cursor-pointer"
+          >
+            {copied ? <CheckCircle2 size={13} className="text-accent" /> : <Copy size={13} />}
+            {copied ? <span>Copied</span> : null}
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            title={saved ? "Saved" : "Save note"}
+            className="inline-flex items-center gap-1 text-2xs text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded-sm hover:bg-surface cursor-pointer"
+          >
+            <Bookmark size={13} className={saved ? "text-accent fill-accent" : ""} />
+            {saved ? <span>Saved</span> : null}
+          </button>
+        </div>
+      </div>
+  );
 }
 
 /* ---------- Main Component ---------- */
@@ -180,8 +567,22 @@ function ChatWorkspacePage() {
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [tagPickerOpen, setTagPickerOpen] = useState(false);
   const [tagPickerMode, setTagPickerMode] = useState<"books" | "categories">("books");
-  const [thinkingMode, setThinkingMode] = useState(settings.deepThinkingDefault);
+  const [thinkingMode, setThinkingMode] = useState(false);
   const [webSearch, setWebSearch] = useState(settings.webSearchDefault);
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const toolsMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // Close tools popover when clicking outside
+  useEffect(() => {
+    if (!toolsMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
+        setToolsMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [toolsMenuOpen]);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -306,9 +707,7 @@ function ChatWorkspacePage() {
       .filter(Boolean) as string[];
 
     const personalContextUsed = settings.personalContext.enabled;
-    const notesAccessed = settings.accessNotes;
-
-    // 2. Initialize ReAct Loop
+    const notesAccessed = settings.accessNotes;    // 2. Initialize ReAct Loop with real initial status
     const initialLoop: ReActIteration[] = [
       {
         id: "react-iter-1",
@@ -316,19 +715,17 @@ function ChatWorkspacePage() {
         thought: `Synthesizing inquiry under ${activePersona.name} persona: "${q}". ${
           taggedBookTitles.length > 0
             ? `Restricting retrieval to tagged books: ${taggedBookTitles.join(", ")}.`
-            : "Searching across full library."
+            : "Searching across verified book library."
         } ${
           personalContextUsed
-            ? `Aligning with user's current focus ("${settings.personalContext.currentFocus}") and addressing known bottlenecks ("${settings.personalContext.bottlenecks}").`
+            ? `Aligning with user's current focus ("${settings.personalContext.currentFocus}").`
             : ""
         }`,
         action: {
-          tool: "search_library_vectors",
+          tool: "search_books",
           args: {
             query: q,
-            books: taggedBookTitles,
-            categories: selectedCategories,
-            top_k: 4,
+            books: taggedBookTitles.length > 0 ? taggedBookTitles : "All library books",
           },
         },
         status: "calling_tool",
@@ -357,52 +754,100 @@ function ChatWorkspacePage() {
 
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    // Simulate Agent Step 1: Observation
-    await sleep(650);
-    if (abortControllerRef.current) return;
+    try {
+      // 3. Invoke Real Backend API (Dynamic Effort Tier & Scoped Books)
+      const bookScopeId = selectedBooks.length > 0 ? selectedBooks[0] : undefined;
+      const apiResult = await askLibriaApi({
+        query: q,
+        effort_tier: thinkingMode ? "high" : "low",
+        active_book_id: bookScopeId,
+        tagged_books: selectedBooks.length > 0 ? selectedBooks : null,
+      });
 
-    const observedPassages = [
-      `Found 3 foundational passages from ${taggedBookTitles[0] || "Atomic Habits & Deep Work"}:`,
-      `• Core law: "Reduce cognitive friction in the first 120 seconds of starting."`,
-      `• Cal Newport's principle: "Deep work demands strict boundaries around high-frequency context shifts."`,
-    ];
-
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== activeSession.id) return s;
-        return {
-          ...s,
-          messages: s.messages.map((m) => {
-            if (m.id !== assistantMsgId) return m;
-            const updatedLoop = [...(m.reactLoop || [])];
-            updatedLoop[0] = {
-              ...updatedLoop[0]!,
-              observation: observedPassages.join("\n"),
-              status: "complete",
-            };
-            return { ...m, reactLoop: updatedLoop };
-          }),
-        };
-      })
-    );
-
-    // Simulate Agent Step 2 (Optional Notes query if enabled)
-    if (notesAccessed) {
-      await sleep(500);
       if (abortControllerRef.current) return;
 
-      const noteLoop: ReActIteration = {
-        id: "react-iter-2",
-        iteration: 2,
-        thought: `Querying user's personal margin notes & highlights to cross-reference with author principles...`,
-        action: {
-          tool: "query_user_notes",
-          args: { query: q, userContext: settings.personalContext.currentFocus },
-        },
-        observation: `Retrieved user note from Chapter 3: "Struggle most when attempting deep writing without a pre-written outline."`,
-        status: "complete",
-      };
+      // Update ReAct Loop Visualization with real execution metadata
+      const duration = Math.round(apiResult.total_latency_ms || 350);
+      const isConv = apiResult.is_conversational;
 
+      const updatedLoop: ReActIteration[] = [
+        {
+          id: "react-iter-1",
+          iteration: 1,
+          thought:
+            apiResult.plan_thought ||
+            (isConv
+              ? "Classified query as conversational dialog. Providing direct response."
+              : `Synthesized retrieval plan scoped to verified library wisdom.`),
+          action: isConv
+            ? undefined
+            : {
+                tool: "search_books",
+                args: {
+                  query: q,
+                  books: taggedBookTitles.length > 0 ? taggedBookTitles : "Library collection",
+                },
+              },
+          observation: isConv
+            ? "Direct conversational synthesis completed."
+            : `Retrieved grounded chunks (${apiResult.citations?.length || 0} citation${apiResult.citations?.length === 1 ? "" : "s"}) in ${(duration / 1000).toFixed(1)}s`,
+          status: "complete",
+        },
+      ];
+
+      // 4. Map Grounded Citations
+      const mappedCitations: Citation[] = (apiResult.citations || []).map((c) => ({
+        bookId: c.book_title,
+        chapter: c.section || "General",
+        page: 1,
+        passage: c.quote || `Core principle from ${c.section || c.book_title}`,
+        relevance: c.relevance_score
+          ? `${Math.round(c.relevance_score * 100)}% Match`
+          : "Grounded Citation",
+      }));
+
+      // 5. Stream Real Paragraphs Word-by-Word
+      const rawText = apiResult.answer || "No advice could be synthesized.";
+      const paragraphs = rawText.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+      const streamedParagraphs: string[] = [];
+
+      for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
+        if (abortControllerRef.current) break;
+        const fullPara = paragraphs[pIdx];
+        const words = fullPara.split(" ");
+        let currentWords = "";
+
+        for (let wIdx = 0; wIdx < words.length; wIdx++) {
+          if (abortControllerRef.current) break;
+          currentWords += (wIdx === 0 ? "" : " ") + words[wIdx];
+          const draftParagraphs = [...streamedParagraphs, currentWords];
+
+          setSessions((prev) =>
+            prev.map((s) => {
+              if (s.id !== activeSession.id) return s;
+              return {
+                ...s,
+                messages: s.messages.map((m) => {
+                  if (m.id !== assistantMsgId) return m;
+                  return {
+                    ...m,
+                    content: draftParagraphs,
+                    citations: mappedCitations,
+                    reactLoop: updatedLoop,
+                  };
+                }),
+              };
+            })
+          );
+
+          await sleep(16);
+        }
+
+        streamedParagraphs.push(fullPara);
+        await sleep(35);
+      }
+
+      // 6. Finalize Message State
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== activeSession.id) return s;
@@ -410,137 +855,56 @@ function ChatWorkspacePage() {
             ...s,
             messages: s.messages.map((m) => {
               if (m.id !== assistantMsgId) return m;
-              return { ...m, reactLoop: [...(m.reactLoop || []), noteLoop] };
+              return {
+                ...m,
+                content: paragraphs,
+                citations: mappedCitations,
+                reactLoop: updatedLoop,
+                isStreaming: false,
+              };
             }),
           };
         })
       );
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to reach Libria AI backend");
+      setSessions((prev) =>
+        prev.map((s) => {
+          if (s.id !== activeSession.id) return s;
+          return {
+            ...s,
+            messages: s.messages.map((m) => {
+              if (m.id !== assistantMsgId) return m;
+              return {
+                ...m,
+                content: [
+                  "⚠️ Unable to reach the Libria backend service. Please verify that the FastAPI backend server is running on http://127.0.0.1:8000.",
+                ],
+                isStreaming: false,
+              };
+            }),
+          };
+        })
+      );
+    } finally {
+      setIsStreaming(false);
     }
-
-    // Step 3: Stream Final Answer Content
-    await sleep(550);
-    if (abortControllerRef.current) return;
-
-    let paragraph1 = "";
-    let paragraph2 = "";
-    let takeaways: string[] = [];
-    let actionProtocol: string[] = [];
-
-    if (settings.persona === "coach") {
-      paragraph1 = `To solve this directly, we must cut through friction and structure your environment so starting requires almost zero willpower. According to James Clear in *Atomic Habits*, human behavior follows the Path of Least Resistance—if cognitive friction is high, procrastination is the inevitable default response.`;
-      paragraph2 = personalContextUsed
-        ? `Since your focus is ${settings.personalContext.currentFocus}, and you face ${settings.personalContext.bottlenecks}, we need to decouple planning from execution. Do not sit down to write and decide *what* to write simultaneously.`
-        : `By anchoring this behavior to an existing trigger in your daily schedule, you remove the daily negotiation with yourself.`;
-      takeaways = [
-        "Pre-commit the first 2 minutes of the task the evening prior.",
-        "Remove all secondary browser tabs before beginning the work block.",
-        "Establish an unequivocal finish threshold for each session.",
-      ];
-      actionProtocol = [
-        "Step 1: Set out a single physical notebook with one active task before going to bed.",
-        "Step 2: When the morning focus block starts, execute without opening email or messaging.",
-        "Step 3: Track completion on a visual calendar to build momentum.",
-      ];
-    } else if (settings.persona === "mentor") {
-      paragraph1 = `When we look deeper into this challenge, the friction is rarely about a lack of discipline; it is almost always about unacknowledged cognitive ambiguity. As Marcus Aurelius observed, "The impediment to action advances action. What stands in the way becomes the way."`;
-      paragraph2 = `Ask yourself: What is the emotional resistance attached to starting this particular project? Once you identify whether the friction is fear of imperfection or ambiguity of direction, the path forward clarifies naturally.`;
-      takeaways = [
-        "Examine the underlying belief causing hesitation.",
-        "Separate your identity from the outcome of the initial draft.",
-        "Clarity of intent dissolves resistance faster than raw willpower.",
-      ];
-    } else {
-      // scholar
-      paragraph1 = `A rigorous comparative analysis reveals a fascinating convergence between Cal Newport's attention-restoration model in *Deep Work* and James Clear's behavioral cue theory. Newport argues that attention operates like a finite cognitive muscle that incurs switching costs with every distraction.`;
-      paragraph2 = `Conversely, modern behavioral psychology demonstrates that habits are identity-reinforcing loops. Therefore, the optimal synthesis is not merely scheduling time blocks, but actively cultivating an identity that rejects low-value interruptions.`;
-      takeaways = [
-        "Attention switching residue degrades executive cognitive function by up to 40%.",
-        "Environmental architecture dictates baseline cognitive expenditure.",
-        "Identity-aligned behavioral cues generate superior long-term adherence.",
-      ];
-    }
-
-    const citations: Citation[] = [
-      {
-        bookId: "atomic_habits_by_james_clear.pdf",
-        chapter: "The 3rd Law: Make It Easy",
-        page: 152,
-        passage:
-          "Standardize before you optimize. You cannot improve a habit that doesn't exist. Focus on the two-minute rule.",
-        relevance: "Primary behavioral law addressing task initiation and cognitive resistance.",
-      },
-      {
-        bookId: "deep_work_by_cal_newport.pdf",
-        chapter: "Rule #1: Work Deeply",
-        page: 98,
-        passage:
-          "To produce at your peak level you need to work for extended periods with full concentration on a single task free from distraction.",
-        relevance: "Defines attention boundaries and elimination of shallow friction.",
-      },
-    ];
-
-    // Stream the paragraphs progressively
-    const streamContent = [paragraph1, paragraph2];
-
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== activeSession.id) return s;
-        return {
-          ...s,
-          messages: s.messages.map((m) => {
-            if (m.id !== assistantMsgId) return m;
-            return {
-              ...m,
-              content: streamContent,
-              takeaways,
-              actionProtocol: actionProtocol.length > 0 ? actionProtocol : undefined,
-              citations,
-              isStreaming: false,
-            };
-          }),
-        };
-      })
-    );
-
-    setIsStreaming(false);
   };
 
-  // Quick Starter Prompts
-  const starterPrompts = [
-    {
-      title: "14-Day Deep Work Protocol",
-      prompt: "Design a 14-day progressive protocol to build 3 hours of uninterrupted daily deep work.",
-      badge: "Deep Work",
-    },
-    {
-      title: "Overcoming Afternoon Procrastination",
-      prompt: "How can I systematically overcome afternoon fatigue and avoid distracted browsing?",
-      badge: "Habits",
-    },
-    {
-      title: "Presence in High-Stakes Conversations",
-      prompt: "What are the core techniques from The Charisma Myth to project warmth and authority simultaneously?",
-      badge: "Psychology",
-    },
-    {
-      title: "Synthesize Stoic & Modern Self-Regulation",
-      prompt: "Compare Stoic emotional regulation with modern cognitive behavioral techniques from the library.",
-      badge: "Philosophy",
-    },
-  ];
+
 
   return (
     <AppShell fullHeight>
       <div className="flex flex-col h-full w-full bg-background overflow-hidden select-text relative">
         {/* Header Bar */}
-        <header className="shrink-0 flex items-center justify-between border-b border-border-subtle px-3 py-2.5 sm:px-4 sm:py-3 bg-background/90 backdrop-blur z-20">
+        <header className="shrink-0 flex items-center justify-between px-3 py-2.5 sm:px-6 sm:py-3 bg-background/90 backdrop-blur z-20">
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <div className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-sm bg-accent-soft text-accent border border-accent/20 shrink-0">
               <Sparkles size={15} strokeWidth={1.75} />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 sm:gap-2">
-                <h2 className="font-serif text-xs sm:text-sm font-medium text-foreground truncate">
+                <h2 className="font-sans text-xs sm:text-sm font-semibold text-foreground truncate">
                   Libria Agent
                 </h2>
                 <span
@@ -632,309 +996,26 @@ function ChatWorkspacePage() {
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto px-3 sm:px-6 md:px-12 lg:px-20 py-4 sm:py-6 space-y-6 sm:space-y-8 min-w-0"
+          className="flex-1 overflow-y-auto px-2.5 sm:px-6 md:px-12 lg:px-20 py-2.5 sm:py-6 space-y-4 sm:space-y-8 min-w-0"
         >
             {messages.length === 0 ? (
-              /* EMPTY STATE HERO */
-              <div className="max-w-2xl mx-auto my-auto py-8 text-center space-y-8 animate-in fade-in duration-300">
-                <div className="space-y-3">
-                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-sm bg-accent-soft text-accent border border-accent/20 shadow-xs">
-                    <Sparkles size={24} strokeWidth={1.75} />
-                  </div>
-                  <h1 className="font-serif text-2xl font-medium text-foreground tracking-tight">
-                    How can Libria guide your personal growth?
-                  </h1>
-                  <p className="text-xs text-muted-foreground max-w-md mx-auto leading-relaxed">
-                    Operating as your <span className="font-medium text-foreground">{activePersona.name}</span>, grounded in your library of {books.length} books and your personal context.
-                  </p>
+              /* CLEAN EMPTY STATE HERO (MATCHING ASK PANEL) */
+              <div className="flex flex-col items-center justify-center my-auto py-10 sm:py-20 px-3 sm:px-4 text-center space-y-2.5 sm:space-y-3 animate-in fade-in duration-300 select-none">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-accent-soft text-accent border border-accent/20 shadow-xs mb-1">
+                  <Sparkles size={22} strokeWidth={1.75} />
                 </div>
-
-                {/* Personal Context Banner */}
-                {settings.personalContext.enabled && (
-                  <div
-                    onClick={() => setSettingsOpen(true)}
-                    className="flex items-center justify-between gap-3 p-3 rounded-sm border border-accent/30 bg-accent-soft/20 text-left cursor-pointer hover:border-accent transition-all max-w-lg mx-auto shadow-2xs"
-                  >
-                    <div className="flex items-start gap-2.5">
-                      <User size={15} className="text-accent shrink-0 mt-0.5" />
-                      <div className="space-y-0.5">
-                        <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-accent">
-                          Active Personal Focus
-                        </p>
-                        <p className="text-xs text-foreground line-clamp-2">
-                          “{settings.personalContext.currentFocus}”
-                        </p>
-                      </div>
-                    </div>
-                    <SlidersHorizontal size={13} className="text-accent shrink-0" />
-                  </div>
-                )}
-
-                {/* Starter Prompts Grid */}
-                <div className="grid sm:grid-cols-2 gap-3 text-left max-w-xl mx-auto">
-                  {starterPrompts.map((item) => (
-                    <button
-                      key={item.title}
-                      onClick={() => handleSendMessage(item.prompt)}
-                      className="group p-3.5 rounded-sm border border-border bg-surface/40 hover:border-accent hover:bg-surface hover:shadow-xs transition-all flex flex-col justify-between"
-                    >
-                      <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                          <span className="font-serif text-xs font-medium text-foreground group-hover:text-accent transition-colors">
-                            {item.title}
-                          </span>
-                          <span className="text-2xs font-mono text-faint px-1.5 py-0.5 rounded-xs bg-surface border border-border-subtle">
-                            {item.badge}
-                          </span>
-                        </div>
-                        <p className="text-2xs text-muted-foreground line-clamp-2 leading-relaxed">
-                          {item.prompt}
-                        </p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                <h2 className="font-serif text-2xl font-medium text-foreground tracking-tight">
+                  Ask Your Library
+                </h2>
+                <p className="text-xs sm:text-sm text-muted-foreground leading-relaxed max-w-sm">
+                  Extract core principles, synthesize ideas across books, or turn insights into actionable habits.
+                </p>
               </div>
             ) : (
-              /* MESSAGE FEED */
-              <div className="max-w-3xl mx-auto space-y-8">
+              /* MESSAGE FEED WITH ENHANCED READABILITY & COLLAPSIBLE CONTROLS */
+              <div className="max-w-3xl mx-auto space-y-6">
                 {messages.map((msg) => (
-                  <div key={msg.id} className="space-y-4 animate-in fade-in duration-200">
-                    {msg.role === "user" ? (
-                      /* USER MESSAGE */
-                      <div className="flex items-start justify-end gap-3">
-                        <div className="max-w-[85%] sm:max-w-[75%] space-y-1.5 text-right">
-                          <div className="inline-block rounded-lg bg-surface border border-border px-4 py-2.5 text-xs text-foreground shadow-2xs leading-relaxed text-left">
-                            {/* Attached Page Photo Badge */}
-                            {msg.attachedPage ? (
-                              <div className="mb-2 flex items-center gap-2 rounded-xs border border-accent/30 bg-background/80 p-1.5 text-2xs text-muted-foreground">
-                                <div className="h-10 w-8 rounded-xs overflow-hidden border border-border bg-surface shrink-0 shadow-2xs">
-                                  <img
-                                    src={msg.attachedPage.imageUrl}
-                                    alt={`Page ${msg.attachedPage.pageNumber}`}
-                                    className="h-full w-full object-cover"
-                                  />
-                                </div>
-                                <div className="min-w-0">
-                                  <p className="font-mono font-medium text-accent">Page {msg.attachedPage.pageNumber}</p>
-                                  {msg.attachedPage.bookTitle ? (
-                                    <p className="truncate text-3xs text-faint max-w-[160px]">{msg.attachedPage.bookTitle}</p>
-                                  ) : null}
-                                </div>
-                              </div>
-                            ) : null}
-
-                            {/* Attached Excerpt Badge */}
-                            {msg.contextPassage ? (
-                              <div className="mb-2 flex items-start gap-1.5 rounded-xs border-l-2 border-accent bg-background/80 px-2 py-1 text-2xs text-muted-foreground">
-                                <Quote size={11} className="shrink-0 text-accent mt-0.5" />
-                                <p className="line-clamp-2 italic font-serif">“{msg.contextPassage}”</p>
-                              </div>
-                            ) : null}
-
-                            {typeof msg.content === "string" ? msg.content : msg.content.join("\n\n")}
-                          </div>
-
-                          {/* Tag badges */}
-                          {((msg.taggedBooks && msg.taggedBooks.length > 0) ||
-                            (msg.taggedCategories && msg.taggedCategories.length > 0)) && (
-                            <div className="flex flex-wrap items-center justify-end gap-1.5 text-2xs font-mono text-muted-foreground">
-                              {msg.taggedBooks?.map((bid) => {
-                                const b = books.find((x) => x.id === bid);
-                                return (
-                                  <span
-                                    key={bid}
-                                    className="inline-flex items-center gap-1 rounded-full border border-border bg-reading px-2 py-0.5 text-2xs"
-                                  >
-                                    <BookOpen size={10} className="text-accent" />
-                                    <span>{b?.title || bid}</span>
-                                  </span>
-                                );
-                              })}
-                              {msg.taggedCategories?.map((cat) => (
-                                <span
-                                  key={cat}
-                                  className="inline-flex items-center gap-1 rounded-full border border-border bg-reading px-2 py-0.5 text-2xs capitalize"
-                                >
-                                  <Hash size={10} className="text-accent" />
-                                  <span>{cat.replace(/_/g, " ")}</span>
-                                </span>
-                              ))}
-                            </div>
-                          )}
-
-                          <span className="block text-2xs text-faint font-mono">
-                            {msg.timestamp}
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      /* ASSISTANT MESSAGE */
-                      <div className="flex items-start gap-3.5">
-                        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-sm bg-accent-soft text-accent border border-accent/20 mt-0.5">
-                          <Sparkles size={14} strokeWidth={2} />
-                        </div>
-
-                        <div className="min-w-0 flex-1 space-y-4">
-                          {/* Assistant Header Metadata */}
-                          <div className="flex items-center gap-2 text-2xs text-muted-foreground font-mono">
-                            <span className="font-medium text-foreground">Libria</span>
-                            <span>·</span>
-                            <span className="capitalize">{msg.persona || "Coach"}</span>
-                            {msg.personalContextUsed && (
-                              <>
-                                <span>·</span>
-                                <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                                  <User size={10} />
-                                  Context Grounded
-                                </span>
-                              </>
-                            )}
-                            {msg.notesAccessed && (
-                              <>
-                                <span>·</span>
-                                <span className="inline-flex items-center gap-1 text-accent">
-                                  <BookOpen size={10} />
-                                  Notes Cited
-                                </span>
-                              </>
-                            )}
-                            <span className="ml-auto text-faint">{msg.timestamp}</span>
-                          </div>
-
-                          {/* REAT CHAIN OF THOUGHT (Pure Transparent Stream) */}
-                          {msg.reactLoop && msg.reactLoop.length > 0 && (
-                            <div className="space-y-2 border-l-2 border-accent/40 pl-3 py-1 my-2">
-                              <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-accent flex items-center gap-1.5">
-                                <Brain size={12} />
-                                <span>Thought Trace & Retrieval</span>
-                              </p>
-
-                              {msg.reactLoop.map((step) => (
-                                <div key={step.id} className="space-y-1.5 text-xs text-muted-foreground">
-                                  <p className="italic text-foreground/80 leading-relaxed font-serif">
-                                    "{step.thought}"
-                                  </p>
-
-                                  {step.action && (
-                                    <div className="flex items-center gap-1.5 text-2xs font-mono text-accent">
-                                      <Zap size={11} />
-                                      <span>Invoked tool: {step.action.tool}()</span>
-                                    </div>
-                                  )}
-
-                                  {step.observation && (
-                                    <div className="text-2xs text-muted-foreground bg-surface/50 border border-border-subtle p-2 rounded-xs whitespace-pre-line font-mono">
-                                      {step.observation}
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
-                          {/* MAIN PROSE CONTENT */}
-                          <div className="space-y-3 font-serif text-sm leading-relaxed text-foreground">
-                            {Array.isArray(msg.content) ? (
-                              msg.content.map((p, idx) => <p key={idx}>{p}</p>)
-                            ) : (
-                              <p>{msg.content}</p>
-                            )}
-                          </div>
-
-                          {/* ACTION PROTOCOL (If Coach mode) */}
-                          {msg.actionProtocol && msg.actionProtocol.length > 0 && (
-                            <div className="space-y-2 pt-2">
-                              <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-foreground flex items-center gap-1.5">
-                                <Zap size={12} className="text-accent" />
-                                <span>Action Protocol</span>
-                              </p>
-                              <div className="space-y-1.5">
-                                {msg.actionProtocol.map((step, idx) => (
-                                  <div
-                                    key={idx}
-                                    className="flex items-start gap-2 text-xs text-foreground bg-surface/40 p-2 rounded-xs border border-border-subtle"
-                                  >
-                                    <CheckCircle2 size={13} className="text-accent shrink-0 mt-0.5" />
-                                    <span>{step}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* KEY TAKEAWAYS */}
-                          {msg.takeaways && msg.takeaways.length > 0 && (
-                            <div className="space-y-2 pt-2">
-                              <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-faint">
-                                Key Takeaways
-                              </p>
-                              <ul className="space-y-1 text-xs text-muted-foreground list-disc list-inside">
-                                {msg.takeaways.map((t, idx) => (
-                                  <li key={idx} className="leading-relaxed">
-                                    {t}
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          {/* GROUNDED CITATIONS */}
-                          {msg.citations && msg.citations.length > 0 && (
-                            <div className="space-y-2 pt-3 border-t border-border-subtle">
-                              <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-faint flex items-center gap-1.5">
-                                <Quote size={11} />
-                                <span>Literature Grounding</span>
-                              </p>
-                              <div className="grid gap-2">
-                                {msg.citations.map((c, idx) => {
-                                  const b = books.find((x) => x.id === c.bookId);
-                                  return (
-                                    <div
-                                      key={idx}
-                                      className="p-2.5 rounded-xs border border-border bg-surface/30 space-y-1 text-2xs"
-                                    >
-                                      <div className="flex items-center justify-between font-mono text-foreground font-medium">
-                                        <span>{b?.title || c.bookId}</span>
-                                        <span className="text-faint">{c.chapter}</span>
-                                      </div>
-                                      <p className="font-serif italic text-muted-foreground">
-                                        “{c.passage}”
-                                      </p>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Message Actions */}
-                          <div className="flex items-center gap-2 pt-2 text-faint">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const text = Array.isArray(msg.content) ? msg.content.join("\n\n") : msg.content;
-                                void navigator.clipboard?.writeText(text);
-                                toast.success("Copied answer to clipboard");
-                              }}
-                              className="inline-flex items-center gap-1 text-2xs hover:text-foreground transition-colors p-1"
-                            >
-                              <Copy size={12} />
-                              <span>Copy</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => toast.success("Saved advice to your reading notes")}
-                              className="inline-flex items-center gap-1 text-2xs hover:text-foreground transition-colors p-1"
-                            >
-                              <Bookmark size={12} />
-                              <span>Save to Notes</span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                  <ChatMessageItem key={msg.id} msg={msg} books={books} />
                 ))}
                 <div ref={messagesEndRef} />
               </div>
@@ -953,8 +1034,8 @@ function ChatWorkspacePage() {
           )}
 
           {/* BOTTOM CHATGPT-STYLE COMPOSER */}
-          <div className="shrink-0 bg-background/95 backdrop-blur-xs w-full z-10 mb-[56px] lg:mb-0 border-t border-border-subtle lg:border-t-0">
-            <div className="max-w-3xl mx-auto p-2.5 sm:p-4 relative">
+          <div className="shrink-0 bg-background/95 backdrop-blur-xs w-full z-10 mb-[56px] lg:mb-0">
+            <div className="max-w-3xl mx-auto p-2 sm:p-4 relative">
               {/* Tag Picker Popover */}
               <TagPickerPopover
                 open={tagPickerOpen}
@@ -1052,71 +1133,166 @@ function ChatWorkspacePage() {
               {/* Composer Toolbar */}
               <div className="flex items-center justify-between pt-1 text-xs">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  {/* Tag Book Button */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTagPickerMode("books");
-                      setTagPickerOpen((p) => !p);
-                    }}
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-2xs transition-colors",
-                      selectedBooks.length > 0
-                        ? "border-accent bg-accent-soft text-accent font-medium"
-                        : "border-border-subtle bg-background text-muted-foreground hover:text-foreground"
-                    )}
-                  >
-                    <BookOpen size={11} />
-                    <span>@ Book</span>
-                  </button>
+                  {/* Plus Icon Trigger & Tools Popover */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setToolsMenuOpen((p) => !p)}
+                      title="Agent features & tools"
+                      className={cn(
+                        "inline-flex h-7 w-7 items-center justify-center rounded-full border transition-all cursor-pointer",
+                        toolsMenuOpen
+                          ? "border-accent bg-accent-soft text-accent shadow-xs"
+                          : "border-border-subtle bg-surface/70 hover:bg-surface text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      <Plus
+                        size={14}
+                        className={cn("transition-transform duration-200", toolsMenuOpen && "rotate-45")}
+                      />
+                    </button>
 
-                  {/* Tag Category Button */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTagPickerMode("categories");
-                      setTagPickerOpen((p) => !p);
-                    }}
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-2xs transition-colors",
-                      selectedCategories.length > 0
-                        ? "border-accent bg-accent-soft text-accent font-medium"
-                        : "border-border-subtle bg-background text-muted-foreground hover:text-foreground"
-                    )}
-                  >
-                    <Hash size={11} />
-                    <span># Category</span>
-                  </button>
+                    {/* Tools Popover Menu */}
+                    {toolsMenuOpen && (
+                      <div
+                        ref={toolsMenuRef}
+                        className="absolute bottom-9 left-0 z-40 w-56 rounded-xl border border-border bg-surface/95 backdrop-blur-md p-1.5 shadow-xl animate-in fade-in zoom-in-95 duration-150 text-xs space-y-0.5 select-none"
+                      >
+                        <div className="px-2.5 py-1 text-3xs font-semibold uppercase tracking-[0.08em] text-faint">
+                          Agent Features
+                        </div>
 
-                  {/* Thinking Toggle */}
-                  <button
-                    type="button"
-                    onClick={() => setThinkingMode((p) => !p)}
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-2xs transition-colors",
-                      thinkingMode
-                        ? "border-accent bg-accent-soft text-accent font-medium"
-                        : "border-border-subtle bg-background text-muted-foreground hover:text-foreground"
-                    )}
-                  >
-                    <Brain size={11} />
-                    <span>Thinking</span>
-                  </button>
+                        {/* Tag Books Option */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setToolsMenuOpen(false);
+                            setTagPickerMode("books");
+                            setTagPickerOpen(true);
+                          }}
+                          className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg hover:bg-accent-soft/40 transition-colors text-left text-foreground cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <BookOpen size={14} className="text-accent shrink-0" />
+                            <span className="text-xs font-medium">Tag Books</span>
+                          </div>
+                          {selectedBooks.length > 0 && (
+                            <span className="text-3xs font-mono px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">
+                              {selectedBooks.length}
+                            </span>
+                          )}
+                        </button>
 
-                  {/* Web Search Toggle */}
-                  <button
-                    type="button"
-                    onClick={() => setWebSearch((p) => !p)}
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-2xs transition-colors",
-                      webSearch
-                        ? "border-accent bg-accent-soft text-accent font-medium"
-                        : "border-border-subtle bg-background text-muted-foreground hover:text-foreground"
+                        {/* Filter Category Option */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setToolsMenuOpen(false);
+                            setTagPickerMode("categories");
+                            setTagPickerOpen(true);
+                          }}
+                          className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg hover:bg-accent-soft/40 transition-colors text-left text-foreground cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Hash size={14} className="text-accent shrink-0" />
+                            <span className="text-xs font-medium">Filter Category</span>
+                          </div>
+                          {selectedCategories.length > 0 && (
+                            <span className="text-3xs font-mono px-1.5 py-0.5 rounded-full bg-accent-soft text-accent">
+                              {selectedCategories.length}
+                            </span>
+                          )}
+                        </button>
+
+                        <div className="my-1 border-t border-border-subtle" />
+
+                        {/* Thinking Mode Option */}
+                        <button
+                          type="button"
+                          onClick={() => setThinkingMode((p) => !p)}
+                          className={cn(
+                            "w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg transition-colors text-left cursor-pointer",
+                            thinkingMode
+                              ? "bg-accent-soft/60 text-accent font-medium"
+                              : "hover:bg-accent-soft/20 text-foreground"
+                          )}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Brain size={14} className={thinkingMode ? "text-accent" : "text-muted-foreground"} />
+                            <span className="text-xs font-medium">Deep Thinking</span>
+                          </div>
+                          <span
+                            className={cn(
+                              "text-3xs font-mono px-1.5 py-0.5 rounded-full",
+                              thinkingMode
+                                ? "bg-accent text-accent-foreground font-semibold"
+                                : "text-faint"
+                            )}
+                          >
+                            {thinkingMode ? "On" : "Off"}
+                          </span>
+                        </button>
+
+                        {/* Web Search Option */}
+                        <button
+                          type="button"
+                          onClick={() => setWebSearch((p) => !p)}
+                          className={cn(
+                            "w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg transition-colors text-left cursor-pointer",
+                            webSearch
+                              ? "bg-accent-soft/60 text-accent font-medium"
+                              : "hover:bg-accent-soft/20 text-foreground"
+                          )}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Globe size={14} className={webSearch ? "text-accent" : "text-muted-foreground"} />
+                            <span className="text-xs font-medium">Web Search</span>
+                          </div>
+                          <span
+                            className={cn(
+                              "text-3xs font-mono px-1.5 py-0.5 rounded-full",
+                              webSearch
+                                ? "bg-accent text-accent-foreground font-semibold"
+                                : "text-faint"
+                            )}
+                          >
+                            {webSearch ? "On" : "Off"}
+                          </span>
+                        </button>
+                      </div>
                     )}
-                  >
-                    <Globe size={11} />
-                    <span>Web</span>
-                  </button>
+                  </div>
+
+                  {/* Active Feature Pills (Only shown when active) */}
+                  {thinkingMode && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent-soft/50 px-2 py-0.5 text-3xs font-mono text-accent animate-in fade-in duration-150">
+                      <Brain size={10} />
+                      <span>Thinking</span>
+                      <button
+                        type="button"
+                        onClick={() => setThinkingMode(false)}
+                        className="text-accent/70 hover:text-accent ml-0.5 cursor-pointer"
+                        title="Disable thinking"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  )}
+
+                  {webSearch && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent-soft/50 px-2 py-0.5 text-3xs font-mono text-accent animate-in fade-in duration-150">
+                      <Globe size={10} />
+                      <span>Web</span>
+                      <button
+                        type="button"
+                        onClick={() => setWebSearch(false)}
+                        className="text-accent/70 hover:text-accent ml-0.5 cursor-pointer"
+                        title="Disable web search"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  )}
                 </div>
 
                 {/* Send / Stop Action */}
@@ -1142,7 +1318,7 @@ function ChatWorkspacePage() {
                 )}
               </div>
             </div>
-            <p className="text-center text-3xs text-faint pt-2">
+            <p className="hidden sm:block text-center text-3xs text-faint pt-2">
               Libria Agent synthesizes literature and personal context. Verify core author citations when applying advice.
             </p>
             </div>

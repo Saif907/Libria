@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   ArrowDown,
   ArrowDownRight,
@@ -34,7 +34,6 @@ import { toast } from "sonner";
 import { nanoid } from "nanoid";
 import {
   answerFor,
-  suggestions,
   type Answer,
   type Citation,
   type Contradiction,
@@ -42,7 +41,7 @@ import {
   type Scope,
   scopeLabel,
 } from "@/lib/ask-data";
-import { recentQuestions } from "@/lib/library-data";
+import { askLibriaApi } from "@/lib/api";
 import { CitationList, GroundingBadge } from "./Evidence";
 import { Button, IconButton } from "./primitives";
 import { cn } from "@/lib/utils";
@@ -80,6 +79,7 @@ export interface ChatMessage {
   scope?: Scope;
   contextPassage?: string;
   attachedPage?: AttachedPageContext;
+  attachedPages?: AttachedPageContext[];
   citations?: Citation[];
   grounding?: Grounding;
   practical?: string[];
@@ -378,6 +378,115 @@ function ReActLoopVisualizer({
 }
 
 /**
+ * Safely parses and renders inline code (`text`), bold (**text**), and italic (*text*) markers
+ */
+function renderInlineFormatting(text: string) {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return (
+        <strong key={i} className="font-semibold text-foreground">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith("*") && part.endsWith("*")) {
+      return (
+        <em key={i} className="italic text-foreground/90">
+          {part.slice(1, -1)}
+        </em>
+      );
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code
+          key={i}
+          className="font-mono text-xs px-1.5 py-0.5 rounded-xs bg-surface border border-border/70 text-accent font-medium"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
+}
+
+/**
+ * Enhanced high-readability typography formatter for AI answers in AskPanel
+ */
+function FormattedProseContent({
+  content,
+  isStreaming,
+}: {
+  content: string | string[];
+  isStreaming?: boolean;
+}) {
+  const text = Array.isArray(content) ? content.join("\n\n") : content;
+  const blocks = useMemo(() => text.split(/\n\n+/), [text]);
+
+  return (
+    <div className="space-y-3.5 font-sans text-[15px] sm:text-[15.5px] leading-[1.7] sm:leading-[1.75] text-foreground/95 select-text tracking-normal">
+      {blocks.map((block, idx) => {
+        const trimmed = block.trim();
+        if (!trimmed) return null;
+
+        // Heading 4 (###)
+        if (trimmed.startsWith("### ")) {
+          return (
+            <h4 key={idx} className="font-semibold text-sm sm:text-[15px] text-accent mt-3.5 mb-1">
+              {renderInlineFormatting(trimmed.replace(/^###\s+/, ""))}
+            </h4>
+          );
+        }
+        // Heading 3 (##)
+        if (trimmed.startsWith("## ")) {
+          return (
+            <h3 key={idx} className="font-semibold text-base sm:text-lg text-foreground mt-4 mb-1.5">
+              {renderInlineFormatting(trimmed.replace(/^##\s+/, ""))}
+            </h3>
+          );
+        }
+        // Heading 2 (#)
+        if (trimmed.startsWith("# ")) {
+          return (
+            <h2 key={idx} className="font-bold text-lg sm:text-xl text-foreground mt-4.5 mb-2 tracking-tight">
+              {renderInlineFormatting(trimmed.replace(/^#\s+/, ""))}
+            </h2>
+          );
+        }
+
+        // Bullet or numbered lists
+        const lines = trimmed.split("\n");
+        const isList = lines.length > 1 && lines.every((l) => /^\s*([•\-\*]|\d+[\.\)])\s/.test(l));
+        if (isList) {
+          return (
+            <ul key={idx} className="space-y-2 pl-2 sm:pl-3 my-2.5 list-none">
+              {lines.map((line, lIdx) => (
+                <li key={lIdx} className="flex items-start gap-2.5">
+                  <span className="text-accent font-bold mt-1 shrink-0 text-xs select-none">•</span>
+                  <span className="flex-1 leading-[1.7] sm:leading-[1.75] text-foreground/90">
+                    {renderInlineFormatting(line.replace(/^\s*([•\-\*]|\d+[\.\)])\s+/, ""))}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          );
+        }
+
+        return (
+          <p key={idx} className="leading-[1.7] sm:leading-[1.75]">
+            {renderInlineFormatting(trimmed)}
+            {isStreaming && idx === blocks.length - 1 ? (
+              <span className="inline-block w-1.5 h-4 bg-accent ml-1.5 animate-pulse align-middle rounded-xs" />
+            ) : null}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * Individual Chat Message Bubble
  */
 function ChatMessageItem({
@@ -389,7 +498,8 @@ function ChatMessageItem({
 }) {
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [showSources, setShowSources] = useState(false);
+  const [showReasoning, setShowReasoning] = useState(false);
+  const [showCitations, setShowCitations] = useState(false);
 
   const paragraphs = Array.isArray(message.content)
     ? message.content
@@ -411,24 +521,39 @@ function ChatMessageItem({
 
   if (message.role === "user") {
     return (
-      <div className="flex flex-col items-end gap-1.5 pl-8">
-        <div className="rounded-2xl border border-border bg-surface px-4 py-2.5 shadow-xs max-w-[90%] sm:max-w-[85%] text-left">
-          {/* Attached Page Photo Badge */}
-          {message.attachedPage ? (
-            <div className="mb-2 flex items-center gap-2 rounded-xs border border-accent/30 bg-background/80 p-1.5 text-2xs text-muted-foreground">
-              <div className="h-10 w-8 rounded-xs overflow-hidden border border-border bg-surface shrink-0 shadow-2xs">
-                <img
-                  src={message.attachedPage.imageUrl}
-                  alt={`Page ${message.attachedPage.pageNumber}`}
-                  className="h-full w-full object-cover"
-                />
-              </div>
-              <div className="min-w-0">
-                <p className="font-mono font-medium text-accent">Page {message.attachedPage.pageNumber}</p>
-                {message.attachedPage.bookTitle ? (
-                  <p className="truncate text-3xs text-faint max-w-[140px]">{message.attachedPage.bookTitle}</p>
-                ) : null}
-              </div>
+      <div className="flex flex-col items-end gap-1 pl-6">
+        <div className="rounded-2xl sm:rounded-3xl border border-border/80 bg-surface px-4 py-2.5 shadow-2xs max-w-[90%] sm:max-w-[85%] text-left text-[14.5px] sm:text-[15px] leading-[1.65]">
+          {/* Attached Page Photo Badges (Multi-Page Support) */}
+          {((message.attachedPages && message.attachedPages.length > 0) || message.attachedPage) ? (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              {(message.attachedPages && message.attachedPages.length > 0
+                ? message.attachedPages
+                : [message.attachedPage!]
+              ).map((p) => (
+                <div
+                  key={p.pageNumber}
+                  className="flex items-center gap-2 rounded-xs border border-accent/30 bg-background/80 p-1.5 text-2xs text-muted-foreground shadow-2xs"
+                >
+                  <div className="h-10 w-8 rounded-xs overflow-hidden border border-border bg-surface shrink-0">
+                    <img
+                      src={p.imageUrl}
+                      alt={`Page ${p.pageNumber}`}
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-mono font-medium text-accent">Page {p.pageNumber}</p>
+                    {p.bookTitle ? (
+                      <p className="truncate text-3xs text-faint max-w-[120px]">{p.bookTitle}</p>
+                    ) : null}
+                    {p.pageText ? (
+                      <p className="truncate text-3xs text-muted-foreground/80 max-w-[140px] italic font-serif">
+                        “{p.pageText.slice(0, 35)}…”
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
             </div>
           ) : null}
 
@@ -440,260 +565,173 @@ function ChatMessageItem({
             </div>
           ) : null}
 
-          <p className="text-sm leading-relaxed text-foreground whitespace-pre-wrap">
+          <p className="whitespace-pre-wrap">
             {paragraphs.join("\n\n")}
           </p>
         </div>
-        <span className="font-mono text-2xs text-faint pr-1">{message.timestamp}</span>
+        <span className="font-mono text-3xs text-faint pr-1.5">{message.timestamp}</span>
       </div>
     );
   }
 
-  // Assistant Response
+  // Assistant Response (Direct ChatGPT-style layout)
   return (
-    <div className="flex flex-col gap-2 pr-1 sm:pr-2 animate-in fade-in slide-in-from-bottom-1 duration-200 w-full max-w-full min-w-0 overflow-hidden">
-      {/* Assistant Header */}
-      <div className="flex items-center gap-2 min-w-0">
-        <div className="flex h-6 w-6 items-center justify-center rounded-xs bg-accent-soft text-accent border border-accent/20 shrink-0">
-          <Sparkles size={13} strokeWidth={2} />
-        </div>
-        <span className="text-xs font-medium text-foreground shrink-0">Libria</span>
-        {message.grounding ? <GroundingBadge grounding={message.grounding} /> : null}
-        {message.scope ? (
-          <span className="text-2xs text-faint font-mono truncate">· {scopeLabel[message.scope]}</span>
-        ) : null}
-        <span className="ml-auto font-mono text-2xs text-faint shrink-0">{message.timestamp}</span>
-      </div>
+    <div className="w-full space-y-3 animate-in fade-in duration-200">
+      {/* Collapsible Reasoning / Thinking Trace (Hidden by Default) */}
+      {((message.reactLoop && message.reactLoop.length > 0) || message.reasoning) && (
+        <div className="pt-0.5">
+          <button
+            type="button"
+            onClick={() => setShowReasoning(!showReasoning)}
+            className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-surface/70 hover:bg-surface px-3 py-1.5 text-2xs font-mono text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-2xs"
+          >
+            <Brain size={12} className="text-accent" />
+            <span>
+              {message.reactLoop && message.reactLoop.length > 0
+                ? `${message.reactLoop.length} thought ${message.reactLoop.length === 1 ? "step" : "steps"}`
+                : "Reasoning"}
+            </span>
+            <ChevronDown
+              size={12}
+              className={cn("transition-transform duration-200 text-faint", showReasoning && "rotate-180")}
+            />
+          </button>
 
-      {/* Assistant Body */}
-      <div className="pl-5 sm:pl-6 space-y-3 w-full max-w-full min-w-0 overflow-hidden">
-        {/* ReAct Agent Loop Visualizer (Thought -> Action -> Observation) */}
-        {message.reactLoop && message.reactLoop.length > 0 ? (
-          <ReActLoopVisualizer iterations={message.reactLoop} isLive={message.isStreaming} />
-        ) : null}
+          {showReasoning && (
+            <div className="mt-2.5 space-y-2 border-l-2 border-accent/40 bg-surface/35 p-3 rounded-r-xs animate-in fade-in duration-150">
+              <p className="text-2xs font-semibold uppercase tracking-[0.08em] text-accent flex items-center gap-1.5">
+                <Brain size={12} />
+                <span>Thought Trace & Retrieval</span>
+              </p>
 
-        {/* Web Search Badge */}
-        {message.webSearch ? (
-          <div className="flex items-center gap-1.5 text-2xs text-faint font-mono">
-            <Globe size={11} className="text-accent" />
-            <span>Augmented with external search verification</span>
-          </div>
-        ) : null}
+              {message.reasoning && (
+                <p className="italic text-foreground/85 leading-relaxed font-sans text-xs">
+                  "{message.reasoning}"
+                </p>
+              )}
 
-        {/* Streamed Paragraphs */}
-        {paragraphs.map((para, idx) => (
-          <p key={idx} className="font-serif text-sm sm:text-[14.5px] leading-[1.65] text-foreground break-words [overflow-wrap:anywhere]">
-            {para}
-            {message.isStreaming && idx === paragraphs.length - 1 ? (
-              <span className="inline-block w-1.5 h-3.5 bg-accent ml-1 animate-pulse align-middle" />
-            ) : null}
-          </p>
-        ))}
-
-        {/* Practical Actionable Takeaways - directly in chat flow, no box */}
-        {message.practical && message.practical.length > 0 && !message.isStreaming ? (
-          <div className="mt-4 pt-3 border-t border-border-subtle space-y-2">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
-              <Sparkles size={12} className="text-accent" />
-              <span>Actionable Takeaways</span>
-            </div>
-            <ul className="space-y-1.5 text-sm text-foreground/90">
-              {message.practical.map((item, i) => (
-                <li key={i} className="flex items-start gap-2 min-w-0">
-                  <span className="text-accent font-bold mt-0.5 shrink-0">•</span>
-                  <span className="leading-relaxed break-words [overflow-wrap:anywhere] min-w-0">{item}</span>
-                </li>
+              {message.reactLoop?.map((step) => (
+                <div key={step.id} className="space-y-1 text-xs text-muted-foreground">
+                  <p className="italic text-foreground/85 leading-relaxed font-sans">
+                    "{step.thought}"
+                  </p>
+                  {step.action && (
+                    <div className="flex items-center gap-1.5 text-2xs font-mono text-accent">
+                      <Zap size={11} />
+                      <span>Invoked tool: {step.action.tool}()</span>
+                    </div>
+                  )}
+                  {step.observation?.summary && (
+                    <div className="text-2xs text-muted-foreground bg-surface/70 border border-border-subtle p-2 rounded-xs whitespace-pre-line font-mono">
+                      {step.observation.summary}
+                    </div>
+                  )}
+                </div>
               ))}
-            </ul>
-          </div>
-        ) : null}
+            </div>
+          )}
+        </div>
+      )}
 
-        {/* Collapsible Citations & Evidence - directly on chat */}
-        {message.citations && message.citations.length > 0 && !message.isStreaming ? (
-          <div className="pt-2">
-            <button
-              onClick={() => setShowSources((p) => !p)}
-              className="flex items-center gap-1.5 text-2xs font-medium text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-            >
-              {showSources ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-              <span>
-                {message.citations.length} {message.citations.length === 1 ? "Source citation" : "Source citations"}
-              </span>
-            </button>
-            {showSources ? (
-              <div className="mt-2 pl-3 border-l border-border-subtle">
-                <CitationList citations={message.citations} />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
+      {/* Enhanced High-Readability Prose Content */}
+      <FormattedProseContent content={message.content} isStreaming={message.isStreaming} />
 
-        {/* Message Action Bar (Hidden while streaming) */}
-        {!message.isStreaming ? (
-          <div className="flex items-center gap-1 pt-1">
-            <Button
-              size="sm"
-              variant="tertiary"
-              onClick={handleCopy}
-              className="h-6 gap-1 px-2 text-2xs text-muted-foreground hover:text-foreground"
-            >
-              {copied ? <Check size={11} className="text-accent" /> : <Copy size={11} />}
-              <span>{copied ? "Copied" : "Copy"}</span>
-            </Button>
-
-            <Button
-              size="sm"
-              variant="tertiary"
-              onClick={handleSave}
-              className="h-6 gap-1 px-2 text-2xs text-muted-foreground hover:text-foreground"
-            >
-              <Bookmark size={11} className={saved ? "text-accent fill-accent" : ""} />
-              <span>{saved ? "Saved" : "Save note"}</span>
-            </Button>
+      {/* Practical Actionable Takeaways */}
+      {message.practical && message.practical.length > 0 && !message.isStreaming ? (
+        <div className="mt-3 pt-2.5 border-t border-border-subtle space-y-2">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+            <Sparkles size={12} className="text-accent" />
+            <span>Actionable Takeaways</span>
           </div>
-        ) : null}
+          <ul className="space-y-1.5 text-sm text-foreground/90">
+            {message.practical.map((item, i) => (
+              <li key={i} className="flex items-start gap-2 min-w-0">
+                <span className="text-accent font-bold mt-0.5 shrink-0">•</span>
+                <span className="leading-relaxed break-words [overflow-wrap:anywhere] min-w-0">{item}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
-        {/* Quick Follow-up Chips */}
-        {onFollowUp && !message.isStreaming ? (
-          <div className="flex flex-wrap gap-1.5 pt-2">
-            <button
-              onClick={() => onFollowUp("Can you give a practical real-world example?")}
-              className="rounded-xs border border-border-subtle bg-background px-2 py-1 text-2xs text-muted-foreground hover:border-accent hover:text-accent transition-colors"
-            >
-              Give a practical example
-            </button>
-            <button
-              onClick={() => onFollowUp("What is the primary counter-argument to this?")}
-              className="rounded-xs border border-border-subtle bg-background px-2 py-1 text-2xs text-muted-foreground hover:border-accent hover:text-accent transition-colors"
-            >
-              What is the counter-argument?
-            </button>
-          </div>
-        ) : null}
-      </div>
+      {/* Collapsible Citations (Hidden by Default) */}
+      {message.citations && message.citations.length > 0 && !message.isStreaming ? (
+        <div className="pt-1.5">
+          <button
+            type="button"
+            onClick={() => setShowCitations(!showCitations)}
+            className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-surface/70 hover:bg-surface px-3 py-1.5 text-2xs font-mono text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-2xs"
+          >
+            <Quote size={11} className="text-accent" />
+            <span>
+              {message.citations.length} {message.citations.length === 1 ? "Citation" : "Citations"}
+            </span>
+            <ChevronDown
+              size={12}
+              className={cn("transition-transform duration-200 text-faint", showCitations && "rotate-180")}
+            />
+          </button>
+
+          {showCitations && (
+            <div className="mt-2.5 pl-3 border-l-2 border-accent/40 animate-in fade-in duration-150">
+              <CitationList citations={message.citations} />
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {/* Message Actions (ChatGPT-style minimalist icon row) */}
+      {!message.isStreaming ? (
+        <div className="flex items-center gap-1 pt-1 text-faint">
+          <button
+            type="button"
+            onClick={handleCopy}
+            title={copied ? "Copied" : "Copy"}
+            className="inline-flex items-center gap-1 text-2xs text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded-sm hover:bg-surface cursor-pointer"
+          >
+            {copied ? <CheckCircle2 size={13} className="text-accent" /> : <Copy size={13} />}
+            {copied ? <span>Copied</span> : null}
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            title={saved ? "Saved" : "Save note"}
+            className="inline-flex items-center gap-1 text-2xs text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded-sm hover:bg-surface cursor-pointer"
+          >
+            <Bookmark size={13} className={saved ? "text-accent fill-accent" : ""} />
+            {saved ? <span>Saved</span> : null}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 /**
- * Conversational Empty State
+ * Conversational Empty State (Clean Minimalist Hero)
  */
 function ChatEmptyState({
-  scope,
   contextDetail,
-  contextPassage,
-  attachedPage,
-  onSelectPrompt,
 }: {
-  scope: Scope;
-  contextDetail: string;
+  scope?: Scope;
+  contextDetail?: string;
   contextPassage?: string | undefined;
   attachedPage?: AttachedPageContext | undefined;
-  onSelectPrompt: (q: string) => void;
+  attachedPages?: AttachedPageContext[] | undefined;
+  onSelectPrompt?: (q: string) => void;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center my-auto py-8 px-2 text-center space-y-6 animate-in fade-in duration-300">
-      {/* Welcome Banner */}
-      <div className="space-y-2 max-w-xs">
-        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xs bg-accent-soft text-accent border border-accent/20">
-          <Sparkles size={20} strokeWidth={1.75} />
-        </div>
-        <h3 className="font-serif text-lg font-medium text-foreground">
-          Ask Your Library
-        </h3>
-        <p className="text-xs text-muted-foreground leading-relaxed">
-          {contextDetail ? `${contextDetail}. ` : ""}
-          Extract core principles, clarify concepts, or translate insights into practical self-development habits.
-        </p>
+    <div className="flex flex-col items-center justify-center my-auto py-16 px-4 text-center space-y-3 animate-in fade-in duration-300 select-none">
+      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-accent-soft text-accent border border-accent/20 shadow-xs mb-1">
+        <Sparkles size={22} strokeWidth={1.75} />
       </div>
-
-      {/* Selected Page Photo Card */}
-      {attachedPage ? (
-        <div
-          onClick={() => onSelectPrompt(`Summarize the core concepts, frameworks, and diagrams on Page ${attachedPage.pageNumber}.`)}
-          className="group w-full max-w-sm rounded-sm border border-accent/40 bg-accent-soft/20 p-2.5 text-left transition-all hover:border-accent hover:bg-accent-soft/30 cursor-pointer shadow-xs flex items-center gap-3"
-        >
-          <div className="h-16 w-12 rounded-xs border border-border bg-white overflow-hidden shrink-0 shadow-2xs">
-            <img
-              src={attachedPage.imageUrl}
-              alt={`Page ${attachedPage.pageNumber}`}
-              className="h-full w-full object-cover"
-            />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-accent mb-0.5">
-              <Sparkles size={11} />
-              <span>Page {attachedPage.pageNumber} Ready</span>
-            </div>
-            <p className="text-xs font-medium text-foreground truncate">
-              {attachedPage.bookTitle || "Selected PDF Page"}
-            </p>
-            <p className="mt-1 text-2xs text-accent font-medium flex items-center gap-1">
-              <span>Ask about Page {attachedPage.pageNumber}</span>
-              <ChevronRight size={12} className="transition-transform group-hover:translate-x-0.5" />
-            </p>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Selected Passage Card */}
-      {contextPassage ? (
-        <div
-          onClick={() => onSelectPrompt("Explain what the author means in this passage and how to apply it.")}
-          className="group w-full max-w-sm rounded-sm border border-accent/40 bg-accent-soft/20 p-3 text-left transition-all hover:border-accent hover:bg-accent-soft/30 cursor-pointer shadow-xs"
-        >
-          <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-[0.08em] text-accent mb-1.5">
-            <Quote size={11} />
-            <span>Selected Passage Ready</span>
-          </div>
-          <p className="font-serif text-xs italic text-foreground line-clamp-3 leading-relaxed">
-            “{contextPassage}”
-          </p>
-          <p className="mt-2 text-2xs text-accent font-medium flex items-center gap-1">
-            <span>Ask about this passage</span>
-            <ChevronRight size={12} className="transition-transform group-hover:translate-x-0.5" />
-          </p>
-        </div>
-      ) : null}
-
-      {/* Contextual Suggestions Grid */}
-      <div className="w-full max-w-sm space-y-2 text-left">
-        <p className="text-2xs font-medium uppercase tracking-[0.08em] text-faint px-1">
-          Suggested Questions ({scopeLabel[scope]})
-        </p>
-        <div className="grid gap-2">
-          {(suggestions[scope] || suggestions.book).slice(0, 3).map((q) => (
-            <button
-              key={q}
-              onClick={() => onSelectPrompt(q)}
-              className="w-full rounded-xs border border-border bg-surface/50 p-2.5 text-left text-xs text-foreground transition-all hover:border-accent hover:bg-surface hover:text-accent flex items-center justify-between gap-2 shadow-2xs"
-            >
-              <span className="truncate">{q}</span>
-              <ChevronRight size={13} className="shrink-0 text-faint" />
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Recent Inquiries */}
-      {recentQuestions.length > 0 ? (
-        <div className="w-full max-w-sm text-left pt-1">
-          <p className="text-2xs font-medium uppercase tracking-[0.08em] text-faint px-1 mb-1.5">
-            Recent Inquiries
-          </p>
-          <div className="space-y-1">
-            {recentQuestions.slice(0, 2).map((q) => (
-              <button
-                key={q}
-                onClick={() => onSelectPrompt(q)}
-                className="w-full truncate text-left text-xs text-muted-foreground hover:text-accent transition-colors py-1 px-1"
-              >
-                {q}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
+      <h3 className="font-serif text-xl font-medium text-foreground tracking-tight">
+        Ask Your Library
+      </h3>
+      <p className="text-xs text-muted-foreground leading-relaxed max-w-xs">
+        {contextDetail ? `${contextDetail}. ` : ""}
+        Extract core principles, clarify concepts, or translate insights into practical self-development habits.
+      </p>
     </div>
   );
 }
@@ -814,7 +852,7 @@ function AgentToolsPopover({
         >
           <div className="flex items-center gap-2">
             <Brain size={13} className={thinkingMode ? "text-accent" : "text-muted-foreground"} />
-            <span>Thinking Mode (ReAct)</span>
+            <span>Thinking Mode</span>
           </div>
           {thinkingMode ? <Check size={13} className="text-accent" /> : null}
         </button>
@@ -888,7 +926,9 @@ export function AskComposer({
   attachedPassage,
   onClearPassage,
   attachedPage,
+  attachedPages,
   onClearPage,
+  onClearAllPages,
   availableScopes,
   isStreaming,
   thinkingMode,
@@ -907,7 +947,9 @@ export function AskComposer({
   attachedPassage?: string | undefined;
   onClearPassage?: () => void;
   attachedPage?: AttachedPageContext | undefined;
-  onClearPage?: () => void;
+  attachedPages?: AttachedPageContext[] | undefined;
+  onClearPage?: (pageNumber?: number) => void;
+  onClearAllPages?: () => void;
   availableScopes?: Scope[] | undefined;
   isStreaming?: boolean;
   thinkingMode: boolean;
@@ -922,6 +964,8 @@ export function AskComposer({
   const [value, setValue] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const activePages = attachedPages && attachedPages.length > 0 ? attachedPages : attachedPage ? [attachedPage] : [];
 
   const handleSubmit = () => {
     if (!value.trim() || isStreaming) return;
@@ -951,30 +995,43 @@ export function AskComposer({
       {/* Floating Rounded Input Capsule */}
       <div className="relative flex flex-col rounded-2xl border border-border bg-surface/95 shadow-sm transition-all focus-within:border-accent/80 focus-within:ring-1 focus-within:ring-accent/20 p-2 sm:p-2.5">
         {/* Active Mode / Attached Passage / Attached Page Badges inside capsule */}
-        {(attachedPage || attachedPassage || thinkingMode || webSearch || actionPlanMode || synthesisMode || scope !== "page") ? (
+        {(activePages.length > 0 || attachedPassage || thinkingMode || webSearch || actionPlanMode || synthesisMode || scope !== "page") ? (
           <div className="flex flex-wrap items-center gap-1.5 pb-2 px-1">
-            {/* Attached Page Photo Chip */}
-            {attachedPage ? (
-              <div className="inline-flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent-soft/40 pl-1 pr-2 py-0.5 text-2xs text-foreground shadow-2xs">
+            {/* Attached Page Photo Chips (Multi-Page Support) */}
+            {activePages.map((page) => (
+              <div
+                key={page.pageNumber}
+                className="inline-flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent-soft/40 pl-1 pr-2 py-0.5 text-2xs text-foreground shadow-2xs"
+              >
                 <div className="h-5 w-4 rounded-xs overflow-hidden border border-border shrink-0 bg-surface">
                   <img
-                    src={attachedPage.imageUrl}
-                    alt={`Page ${attachedPage.pageNumber}`}
+                    src={page.imageUrl}
+                    alt={`Page ${page.pageNumber}`}
                     className="h-full w-full object-cover"
                   />
                 </div>
-                <span className="font-mono font-medium text-accent">Page {attachedPage.pageNumber}</span>
+                <span className="font-mono font-medium text-accent">Page {page.pageNumber}</span>
                 {onClearPage ? (
                   <button
                     type="button"
-                    onClick={onClearPage}
+                    onClick={() => onClearPage(page.pageNumber)}
                     className="text-muted-foreground hover:text-foreground shrink-0 ml-0.5 cursor-pointer"
-                    title="Detach page photo"
+                    title={`Detach Page ${page.pageNumber}`}
                   >
                     <X size={10} />
                   </button>
                 ) : null}
               </div>
+            ))}
+            {activePages.length > 1 && onClearAllPages ? (
+              <button
+                type="button"
+                onClick={onClearAllPages}
+                className="text-3xs text-faint hover:text-foreground transition-colors px-1 cursor-pointer"
+                title="Clear all attached pages"
+              >
+                Clear all ({activePages.length})
+              </button>
             ) : null}
 
             {/* Attached Passage Chip */}
@@ -1014,7 +1071,7 @@ export function AskComposer({
             {thinkingMode ? (
               <div className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent-soft/30 px-2 py-0.5 text-2xs text-accent">
                 <Brain size={10} />
-                <span>ReAct</span>
+                <span>Thinking</span>
                 <button
                   type="button"
                   onClick={() => setThinkingMode(false)}
@@ -1174,7 +1231,11 @@ export function AskBody({
   contextDetail,
   contextPassage,
   attachedPage: propAttachedPage,
+  attachedPages: propAttachedPages,
   onClearPage: propOnClearPage,
+  onClearAllPages: propOnClearAllPages,
+  activeBookId,
+  activeBookTitle,
   answer,
   setAnswer,
   availableScopes,
@@ -1184,19 +1245,27 @@ export function AskBody({
   contextDetail: string;
   contextPassage?: string | undefined;
   attachedPage?: AttachedPageContext | undefined;
-  onClearPage?: () => void;
+  attachedPages?: AttachedPageContext[] | undefined;
+  onClearPage?: (pageNumber?: number) => void;
+  onClearAllPages?: () => void;
+  activeBookId?: string | undefined;
+  activeBookTitle?: string | undefined;
   answer?: Answer | null;
   setAnswer?: (a: Answer | null) => void;
   availableScopes?: Scope[] | undefined;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [attachedPassage, setAttachedPassage] = useState<string | undefined>(contextPassage);
-  const [attachedPage, setAttachedPage] = useState<AttachedPageContext | undefined>(propAttachedPage);
+  const [attachedPages, setAttachedPages] = useState<AttachedPageContext[]>(() => {
+    if (propAttachedPages && propAttachedPages.length > 0) return propAttachedPages;
+    if (propAttachedPage) return [propAttachedPage];
+    return [];
+  });
   const [isStreaming, setIsStreaming] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   // Agent Mode States
-  const [thinkingMode, setThinkingMode] = useState(true);
+  const [thinkingMode, setThinkingMode] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [actionPlanMode, setActionPlanMode] = useState(false);
   const [synthesisMode, setSynthesisMode] = useState(false);
@@ -1213,13 +1282,35 @@ export function AskBody({
     }
   }, [contextPassage, setScope]);
 
-  // Update attached page when user captures a new page photo
+  // Update attached pages when multiple pages are passed
+  useEffect(() => {
+    if (propAttachedPages) {
+      setAttachedPages(propAttachedPages);
+      if (propAttachedPages.length > 0) setScope("page");
+    }
+  }, [propAttachedPages, setScope]);
+
+  // Update attached pages when single page is passed
   useEffect(() => {
     if (propAttachedPage) {
-      setAttachedPage(propAttachedPage);
+      setAttachedPages((prev) => {
+        if (prev.some((p) => p.pageNumber === propAttachedPage.pageNumber)) return prev;
+        return [...prev, propAttachedPage];
+      });
       setScope("page");
     }
   }, [propAttachedPage, setScope]);
+
+  const handleRemovePage = (pageNum?: number) => {
+    if (!pageNum) {
+      setAttachedPages([]);
+      if (propOnClearAllPages) propOnClearAllPages();
+      else if (propOnClearPage) propOnClearPage();
+      return;
+    }
+    setAttachedPages((prev) => prev.filter((p) => p.pageNumber !== pageNum));
+    if (propOnClearPage) propOnClearPage(pageNum);
+  };
 
   // Smooth auto-scroll to latest message
   const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
@@ -1252,7 +1343,7 @@ export function AskBody({
     toast.info("Stopped generation");
   }, []);
 
-  // ReAct Orchestrator: Thought -> Action -> Observation -> Next Thought -> Final Output
+  // Real Agent Execution: Libria Cloud Gateway + Qdrant
   const handleSendMessage = async (q: string) => {
     abortControllerRef.current = false;
     const currentTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -1265,7 +1356,8 @@ export function AskBody({
       timestamp: currentTime,
       scope,
       contextPassage: attachedPassage,
-      attachedPage,
+      attachedPages: [...attachedPages],
+      attachedPage: attachedPages[0],
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -1273,20 +1365,19 @@ export function AskBody({
 
     const assistantMsgId = nanoid();
 
-    // 2. Build Iteration 1 of ReAct Loop
+    // 2. Initial ReAct Iteration (Planning)
     const initialLoop: ReActIteration[] = [
       {
         id: "react-iter-1",
         iteration: 1,
-        thought: `To answer this inquiry within '${scopeLabel[scope]}', I need to extract the foundational principles and author frameworks on habit architecture and cognitive friction.`,
-        action: {
-          tool: "search_library_vectors",
-          args: {
-            query: attachedPassage ? attachedPassage.slice(0, 50) : q,
-            scope,
-            top_k: 4,
-          },
-        },
+        thought:
+          attachedPages.length > 1
+            ? `Analyzing ${attachedPages.length} attached pages (Pages ${attachedPages.map((p) => p.pageNumber).join(", ")}) with visual diagrams, drawings, tables, and text...`
+            : attachedPages.length === 1
+            ? `Analyzing Page ${attachedPages[0]!.pageNumber} text and visual page layout from "${attachedPages[0]!.bookTitle || activeBookTitle || "book"}"...`
+            : attachedPassage
+            ? "Analyzing selected passage context and synthesizing grounded answer..."
+            : "Analyzing query intent and selecting optimal retrieval tool from book library...",
         status: "calling_tool",
       },
     ];
@@ -1309,7 +1400,6 @@ export function AskBody({
 
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    // Helper: update or add ReAct iteration
     const setIterationState = (
       updater: (prev: ReActIteration[]) => ReActIteration[]
     ) => {
@@ -1322,180 +1412,174 @@ export function AskBody({
       );
     };
 
-    // Execute Iteration 1 (Tool Call -> Observation)
-    await sleep(400);
-    if (abortControllerRef.current) return;
+    try {
+      // 3. Invoke Real Backend API with Grounded Context & Page Images
+      const bookScopeId = attachedPages[0]?.bookId || activeBookId || undefined;
 
-    setIterationState((list) =>
-      list.map((it) =>
-        it.id === "react-iter-1"
-          ? {
-              ...it,
-              status: "received_observation",
-              durationMs: 400,
-              observation: {
-                summary: "Retrieved 3 high-confidence semantic chunks from Chapter 3 & 4 (Relevance: 0.91)",
-                details: [
-                  "Chunk 1: 'Environment design is the invisible hand that shapes human behavior...'",
-                  "Chunk 2: 'Friction must be reduced to near-zero for the initiation phase of compounding...'",
-                  "Chunk 3: 'Never rely on motivation when standardizing defaults in writing.'",
-                ],
-              },
-            }
-          : it
-      )
-    );
+      // Extract all page images for multimodal understanding (diagrams, tables, sketches)
+      const pageImages = attachedPages
+        .map((p) => p.imageUrl)
+        .filter(Boolean);
 
-    // Iteration 2: Next Thought based on Observation 1
-    await sleep(250);
-    if (abortControllerRef.current) return;
+      // Construct grounded prompt payload so LLM reads all attached pages with text and visual snapshots
+      let promptPayload = q;
+      if (attachedPages.length > 0) {
+        const bookName = attachedPages[0]?.bookTitle || activeBookTitle || "the book";
+        const pageListStr = attachedPages.map((p) => `Page ${p.pageNumber}`).join(", ");
+        const pagesContent = attachedPages
+          .map((p) => {
+            const textPart = p.pageText
+              ? `\nText:\n"""\n${p.pageText.slice(0, 3000)}\n"""`
+              : "\n[Visual elements, diagrams, or drawing provided via attached image]";
+            return `--- Page ${p.pageNumber} of "${bookName}" ---${textPart}`;
+          })
+          .join("\n\n");
 
-    const secondIteration: ReActIteration = {
-      id: "react-iter-2",
-      iteration: 2,
-      thought: webSearch
-        ? "The retrieved book passages establish the internal theory. However, the user requested external empirical validation. I will call web search to cross-verify contemporary studies."
-        : "The retrieved passages provide strong theoretical foundations. Now I must analyze potential contradictions and synthesize a concrete personal development heuristic.",
-      action: webSearch
-        ? {
-            tool: "web_grounding_search",
-            args: { query: "habit formation friction defaults empirical studies 66 days", max_results: 3 },
-          }
-        : {
-            tool: "synthesize_cross_perspectives",
-            args: {
-              primary_principle: "Environment defaults over resolve",
-              counter_perspective_check: true,
-            },
-          },
-      status: "calling_tool",
-    };
-
-    setIterationState((list) => [...list, secondIteration]);
-
-    await sleep(450);
-    if (abortControllerRef.current) return;
-
-    setIterationState((list) =>
-      list.map((it) =>
-        it.id === "react-iter-2"
-          ? {
-              ...it,
-              status: "completed",
-              durationMs: 450,
-              observation: {
-                summary: webSearch
-                  ? "Validated with 2 peer-reviewed behavioral papers on context modification"
-                  : "Synthesized core agreement across 3 library authors; identified 1 actionable nuance",
-                details: webSearch
-                  ? [
-                      "Study A: 'Context architecture demonstrates a 2.4x higher adherence rate than willpower goals.'",
-                      "Study B: 'Habit automaticity averages 66 days when environmental triggers are consistent.'",
-                    ]
-                  : [
-                      "Synthesis: Clear (Atomic Habits) and Newport (Deep Work) agree on structural defense of attention.",
-                      "Nuance: Epstein (Range) cautions against premature narrow specialization.",
-                    ],
-              },
-            }
-          : it
-      )
-    );
-
-    // Final Thought before answering
-    await sleep(200);
-    if (abortControllerRef.current) return;
-
-    const finalIteration: ReActIteration = {
-      id: "react-iter-3",
-      iteration: 3,
-      thought: "Sufficient evidence collected from all tool observations. I am now synthesizing the complete grounded response with direct actionable heuristics.",
-      status: "completed",
-      durationMs: 150,
-    };
-
-    setIterationState((list) => [...list, finalIteration]);
-
-    // 3. Resolve Answer Content
-    let resolvedAnswer: Answer;
-    if (attachedPage) {
-      resolvedAnswer = answerForPagePhoto(attachedPage, q, scope, {
-        thinking: thinkingMode,
-        web: webSearch,
-        actionPlan: actionPlanMode,
-        synthesis: synthesisMode,
-      });
-    } else if (attachedPassage && scope === "selection") {
-      resolvedAnswer = answerForPassage(attachedPassage, q, scope, {
-        thinking: thinkingMode,
-        web: webSearch,
-        actionPlan: actionPlanMode,
-        synthesis: synthesisMode,
-      });
-    } else {
-      resolvedAnswer = answerFor(scope, q);
-    }
-
-    // 4. Stream Answer Word by Word
-    const paragraphs = resolvedAnswer.answer;
-    const streamedParagraphs: string[] = [];
-
-    for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
-      if (abortControllerRef.current) break;
-      const fullPara = paragraphs[pIdx];
-      const words = fullPara.split(" ");
-      let currentWords = "";
-
-      for (let wIdx = 0; wIdx < words.length; wIdx++) {
-        if (abortControllerRef.current) break;
-        currentWords += (wIdx === 0 ? "" : " ") + words[wIdx];
-        const draftParagraphs = [...streamedParagraphs, currentWords];
-
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantMsgId
-              ? {
-                  ...msg,
-                  content: draftParagraphs,
-                  grounding: resolvedAnswer.grounding,
-                  citations: resolvedAnswer.citations,
-                  practical: resolvedAnswer.practical,
-                }
-              : msg
-          )
-        );
-
-        await sleep(26);
+        promptPayload = `[Context: User is reading ${pageListStr} of "${bookName}". High-resolution page snapshot(s) attached for visual diagrams, drawings, and tables:\n${pagesContent}\n]\n\nQuestion about ${pageListStr}: ${q}`;
+      } else if (attachedPassage) {
+        promptPayload = `[Context: Selected passage from "${activeBookTitle || "book"}":\n"""\n${attachedPassage}\n"""]\n\nQuestion: ${q}`;
       }
 
-      streamedParagraphs.push(fullPara);
-      await sleep(70);
-    }
+      const apiResult = await askLibriaApi({
+        query: promptPayload,
+        effort_tier: thinkingMode ? "high" : "low",
+        active_book_id: bookScopeId,
+        images: pageImages.length > 0 ? pageImages : undefined,
+      });
 
-    // 5. Finalize
-    setIsStreaming(false);
-    setMessages((prev) => {
-      const updated = prev.map((msg) =>
-        msg.id === assistantMsgId
-          ? {
-              ...msg,
-              isStreaming: false,
-              content: paragraphs,
-              grounding: resolvedAnswer.grounding,
-              citations: resolvedAnswer.citations,
-              practical: resolvedAnswer.practical,
-              contradictions: resolvedAnswer.contradictions,
-              reasoning: resolvedAnswer.reasoning,
-            }
-          : msg
-      );
-      // Synchronize reader conversation to libria_chat_sessions_v1 so it shows in /chat
-      syncAskSessionToStorage(updated, contextDetail, attachedPage?.bookTitle);
-      return updated;
-    });
+      if (abortControllerRef.current) return;
 
-    if (setAnswer) {
-      setAnswer(resolvedAnswer);
+      // Update ReAct Loop Visualization with real execution metadata
+      const duration = Math.round(apiResult.total_latency_ms || 300);
+      const isConv = apiResult.is_conversational;
+
+      setIterationState(() => [
+        {
+          id: "react-iter-1",
+          iteration: 1,
+          thought:
+            apiResult.plan_thought ||
+            (isConv
+              ? "Classified query as conversational greeting. Providing direct warm response."
+              : attachedPages.length > 0
+              ? `Read and visually inspected ${attachedPages.length} attached page(s) (Pages ${attachedPages.map((p) => p.pageNumber).join(", ")}).`
+              : "Selected optimal retrieval tool and scoped to verified book wisdom."),
+          action: isConv
+            ? undefined
+            : {
+                tool: attachedPages.length > 0 ? "read_multimodal_pages" : "search_books",
+                args: attachedPages.length > 0
+                  ? {
+                      pages: attachedPages.map((p) => p.pageNumber),
+                      book: activeBookTitle || attachedPages[0]?.bookTitle,
+                      images_count: pageImages.length,
+                    }
+                  : { query: q, book_filter: bookScopeId || null },
+              },
+          observation: isConv
+            ? undefined
+            : {
+                summary: attachedPages.length > 0
+                  ? `Analyzed ${attachedPages.length} page(s) with ${pageImages.length} image snapshot${pageImages.length === 1 ? "" : "s"} in ${(duration / 1000).toFixed(1)}s`
+                  : `Retrieved grounded book chunks (${apiResult.citations.length} citation${apiResult.citations.length === 1 ? "" : "s"}) in ${(duration / 1000).toFixed(1)}s`,
+                details:
+                  apiResult.books_referenced.length > 0
+                    ? apiResult.books_referenced.map((b) => `Referenced source: ${b}`)
+                    : undefined,
+              },
+          status: "completed",
+          durationMs: duration,
+        },
+      ]);
+
+      // 4. Map Structured Citations
+      const mappedCitations: Citation[] = (apiResult.citations || []).map((c) => ({
+        bookId: c.book_title,
+        chapter: c.section || "General",
+        page: 1,
+        passage: c.quote || `Key principle from ${c.section || c.book_title}`,
+        relevance: c.relevance_score
+          ? `${Math.round(c.relevance_score * 100)}% Match`
+          : "Grounded Citation",
+      }));
+
+      // 5. Stream Real Paragraphs Word-by-Word
+      const rawText = apiResult.answer || "No advice could be synthesized.";
+      const paragraphs = rawText.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+      const streamedParagraphs: string[] = [];
+
+      for (let pIdx = 0; pIdx < paragraphs.length; pIdx++) {
+        if (abortControllerRef.current) break;
+        const fullPara = paragraphs[pIdx];
+        const words = fullPara.split(" ");
+        let currentWords = "";
+
+        for (let wIdx = 0; wIdx < words.length; wIdx++) {
+          if (abortControllerRef.current) break;
+          currentWords += (wIdx === 0 ? "" : " ") + words[wIdx];
+          const draftParagraphs = [...streamedParagraphs, currentWords];
+
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMsgId
+                ? {
+                    ...msg,
+                    content: draftParagraphs,
+                    grounding: isConv ? "grounded" : (mappedCitations.length > 0 ? "grounded" : "not-found"),
+                    citations: mappedCitations,
+                  }
+                : msg
+            )
+          );
+
+          await sleep(16);
+        }
+
+        streamedParagraphs.push(fullPara);
+        await sleep(50);
+      }
+
+      // 6. Finalize Message State
+      setIsStreaming(false);
+      setMessages((prev) => {
+        const updated = prev.map((msg) =>
+          msg.id === assistantMsgId
+            ? {
+                ...msg,
+                isStreaming: false,
+                content: paragraphs,
+                grounding: isConv ? "grounded" : (mappedCitations.length > 0 ? "grounded" : "not-found"),
+                citations: mappedCitations,
+                reasoning: apiResult.plan_thought || undefined,
+              }
+            : msg
+        );
+        syncAskSessionToStorage(updated, contextDetail, attachedPage?.bookTitle);
+        return updated;
+      });
+
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      toast.error(`Agent connection error: ${errMsg}`);
+      setIsStreaming(false);
+
+      setMessages((prev) => {
+        const updated = prev.map((msg) =>
+          msg.id === assistantMsgId
+            ? {
+                ...msg,
+                isStreaming: false,
+                content: [
+                  `⚠️ Could not reach the Libria RAG backend.`,
+                  `Details: ${errMsg}`,
+                  `Please ensure the backend is running at http://127.0.0.1:8000.`,
+                ],
+                grounding: "not-found" as Grounding,
+              }
+            : msg
+        );
+        return updated;
+      });
     }
   };
 
@@ -1508,7 +1592,7 @@ export function AskBody({
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col bg-background relative overflow-hidden">
       {/* Top Thread Bar */}
-      <div className="shrink-0 flex items-center justify-between border-b border-border-subtle px-4 py-2 bg-surface/30 text-xs">
+      <div className="shrink-0 flex items-center justify-between px-4 py-2 bg-surface/30 text-xs">
         <div className="flex items-center gap-1.5 truncate text-muted-foreground">
           <span className="font-mono text-2xs text-faint">Scope:</span>
           <span className="font-medium text-foreground truncate">{scopeLabel[scope]}</span>
@@ -1536,7 +1620,8 @@ export function AskBody({
             scope={scope}
             contextDetail={contextDetail}
             contextPassage={attachedPassage}
-            attachedPage={attachedPage}
+            attachedPage={attachedPages[0]}
+            attachedPages={attachedPages}
             onSelectPrompt={handleSendMessage}
           />
         ) : (
@@ -1544,7 +1629,7 @@ export function AskBody({
             <ChatMessageItem
               key={msg.id}
               message={msg}
-              onFollowUp={msg.role === "assistant" ? handleSendMessage : undefined}
+              onFollowUp={handleSendMessage}
             />
           ))
         )}
@@ -1552,16 +1637,16 @@ export function AskBody({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Floating Jump to Latest Button */}
-      {showScrollBottom ? (
+      {/* Scroll to bottom button */}
+      {showScrollBottom && (
         <button
           onClick={() => scrollToBottom("smooth")}
-          className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 rounded-full border border-border bg-background/95 backdrop-blur-sm px-2.5 py-1 text-2xs text-muted-foreground shadow-md hover:text-foreground transition-all"
+          className="absolute bottom-20 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 rounded-full border border-border bg-background/95 backdrop-blur-sm px-2.5 py-1 text-2xs text-muted-foreground shadow-md hover:text-foreground transition-all active:scale-95"
         >
-          <ArrowDown size={12} />
+          <ArrowDown size={11} />
           <span>Latest</span>
         </button>
-      ) : null}
+      )}
 
       {/* Seamless ChatGPT-Style Bottom Composer */}
       <AskComposer
@@ -1576,11 +1661,10 @@ export function AskBody({
         onStop={handleStop}
         attachedPassage={attachedPassage}
         onClearPassage={() => setAttachedPassage(undefined)}
-        attachedPage={attachedPage}
-        onClearPage={() => {
-          setAttachedPage(undefined);
-          if (propOnClearPage) propOnClearPage();
-        }}
+        attachedPage={attachedPages[0]}
+        attachedPages={attachedPages}
+        onClearPage={handleRemovePage}
+        onClearAllPages={() => handleRemovePage()}
         availableScopes={availableScopes}
         isStreaming={isStreaming}
         thinkingMode={thinkingMode}
@@ -1605,7 +1689,11 @@ export function AskPanel({
   contextDetail,
   contextPassage,
   attachedPage,
+  attachedPages,
   onClearPage,
+  onClearAllPages,
+  activeBookId,
+  activeBookTitle,
   initialScope = "page",
 }: {
   open: boolean;
@@ -1613,7 +1701,11 @@ export function AskPanel({
   contextDetail: string;
   contextPassage?: string | undefined;
   attachedPage?: AttachedPageContext | undefined;
-  onClearPage?: () => void;
+  attachedPages?: AttachedPageContext[] | undefined;
+  onClearPage?: (pageNumber?: number) => void;
+  onClearAllPages?: () => void;
+  activeBookId?: string | undefined;
+  activeBookTitle?: string | undefined;
   initialScope?: Scope | undefined;
 }) {
   const [scope, setScope] = useState<Scope>(initialScope);
@@ -1642,7 +1734,7 @@ export function AskPanel({
         onDoubleClick={resetWidth}
         isDragging={isDragging}
       />
-      <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3 shrink-0">
+      <header className="flex items-center justify-between px-4 py-3 shrink-0">
         <div className="flex items-center gap-2">
           <MessageSquareQuote size={16} className="text-accent" />
           <span className="text-sm font-medium text-foreground">Ask AI</span>
@@ -1667,7 +1759,11 @@ export function AskPanel({
           contextDetail={contextDetail}
           contextPassage={contextPassage}
           attachedPage={attachedPage}
+          attachedPages={attachedPages}
           onClearPage={onClearPage}
+          onClearAllPages={onClearAllPages}
+          activeBookId={activeBookId}
+          activeBookTitle={activeBookTitle}
           answer={answer}
           setAnswer={setAnswer}
         />

@@ -107,30 +107,31 @@ function RootShell({ children }: { children: ReactNode }) {
   // Public-only credentials injected safely for client hydration resilience
   const publicEnv = {
     VITE_SUPABASE_URL:
-      typeof process !== "undefined" && process.env
-        ? (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "")
-        : "",
+      (typeof process !== "undefined" && process.env?.VITE_SUPABASE_URL) ||
+      (typeof process !== "undefined" && process.env?.SUPABASE_URL) ||
+      ((typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_SUPABASE_URL) ?? "") ||
+      "",
     VITE_SUPABASE_PUBLISHABLE_KEY:
-      typeof process !== "undefined" && process.env
-        ? (process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-           process.env.VITE_SUPABASE_ANON_KEY ||
-           process.env.SUPABASE_PUBLISHABLE_KEY ||
-           process.env.SUPABASE_ANON_KEY ||
-           "")
-        : "",
+      (typeof process !== "undefined" && process.env?.VITE_SUPABASE_PUBLISHABLE_KEY) ||
+      (typeof process !== "undefined" && process.env?.VITE_SUPABASE_ANON_KEY) ||
+      (typeof process !== "undefined" && process.env?.SUPABASE_PUBLISHABLE_KEY) ||
+      (typeof process !== "undefined" && process.env?.SUPABASE_ANON_KEY) ||
+      ((typeof import.meta !== "undefined" && ((import.meta as any).env?.VITE_SUPABASE_PUBLISHABLE_KEY || (import.meta as any).env?.VITE_SUPABASE_ANON_KEY)) ?? "") ||
+      "",
   };
 
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
         <script
+          suppressHydrationWarning
           dangerouslySetInnerHTML={{
             __html: `window.__ENV__ = Object.assign(window.__ENV__ || {}, ${JSON.stringify(publicEnv)});`,
           }}
         />
       </head>
-      <body>
+      <body suppressHydrationWarning>
         {children}
         <Scripts />
       </body>

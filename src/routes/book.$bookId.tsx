@@ -292,6 +292,8 @@ function BookDetail() {
         open={ask}
         onClose={() => setAsk(false)}
         contextDetail={`${book.title} · ${book.author}`}
+        activeBookId={book.id}
+        activeBookTitle={book.title}
         initialScope="book"
       />
     </AppShell>

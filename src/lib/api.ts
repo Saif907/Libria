@@ -127,3 +127,74 @@ export async function cancelJobApi(jobId: string): Promise<IndexingJobResponse> 
   }
   return response.json();
 }
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Libria Agent Chat API Client
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+export interface ChatApiCitation {
+  book_title: string;
+  author?: string;
+  section?: string;
+  quote?: string;
+  chunk_id?: string;
+  source_call_id?: string;
+  relevance_score?: number;
+}
+
+export interface ChatApiRequest {
+  query: string;
+  effort_tier?: "low" | "medium" | "high";
+  active_book_id?: string | null;
+  tagged_books?: string[] | null;
+  images?: string[] | null;
+}
+
+export interface ChatApiResponse {
+  execution_id: string;
+  effort_tier: string;
+  answer: string;
+  citations: ChatApiCitation[];
+  books_referenced: string[];
+  is_conversational: boolean;
+  plan_thought?: string | null;
+  total_tool_calls: number;
+  total_latency_ms: number;
+}
+
+/**
+ * Sends a self-development question to the Libria RAG agent backend.
+ */
+export async function askLibriaApi(payload: ChatApiRequest): Promise<ChatApiResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/chat/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      query: payload.query.trim(),
+      effort_tier: payload.effort_tier || "low",
+      active_book_id: payload.active_book_id || null,
+      tagged_books: payload.tagged_books || null,
+      images: payload.images || null,
+    }),
+  });
+
+  if (!response.ok) {
+    let errorDetail = `Agent request failed (${response.status})`;
+    try {
+      const errJson = await response.json();
+      if (errJson.detail) {
+        errorDetail = typeof errJson.detail === "string" ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+    } catch {
+      // Use fallback error message
+    }
+    throw new Error(errorDetail);
+  }
+
+  return response.json();
+}
+

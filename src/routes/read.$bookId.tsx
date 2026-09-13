@@ -1,15 +1,17 @@
-import { createFileRoute, Link, notFound, useNavigate, useRouter } from "@tanstack/react-router";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { createFileRoute, Link, notFound } from "@tanstack/react-router";
+import { useEffect, useRef, useState, useMemo, type CSSProperties } from "react";
 import {
   ArrowLeft,
-  ChevronLeft,
-  ChevronRight,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   FileText,
   Headphones,
   List,
   Maximize2,
   MessageSquareQuote,
   Minimize2,
+  Search,
   Type as TypeIcon,
   X,
 } from "lucide-react";
@@ -19,8 +21,7 @@ import { Button, IconButton, ProgressBar } from "@/components/app/primitives";
 import {
   WORDS_PER_MINUTE,
   formatMinutes,
-  getBookDetail,
-  getChapterContent,
+  getBookFullContent,
   hasPdf,
 } from "@/lib/books";
 import { useProgress } from "@/lib/reading-progress";
@@ -36,16 +37,10 @@ export const Route = createFileRoute("/read/$bookId")({
   },
   staleTime: 60_000,
   gcTime: 15 * 60_000,
-  loaderDeps: ({ search }) => ({ chapter: search.chapter ?? 0 }),
-  loader: async ({ params, deps }) => {
-    // Both calls share the server's parsed-book cache, so this is one download
-    // no matter how many chapters you turn.
-    const [detail, content] = await Promise.all([
-      getBookDetail({ data: { bookId: params.bookId } }),
-      getChapterContent({ data: { bookId: params.bookId, index: deps.chapter } }),
-    ]);
-    if (!detail || !content) throw notFound();
-    return { book: detail.book, chapters: detail.chapters, content };
+  loader: async ({ params }) => {
+    const data = await getBookFullContent({ data: { bookId: params.bookId } });
+    if (!data || !data.book) throw notFound();
+    return data;
   },
   head: ({ loaderData }) => {
     if (!loaderData) {
@@ -56,8 +51,8 @@ export const Route = createFileRoute("/read/$bookId")({
         ],
       };
     }
-    const { book, content } = loaderData;
-    const title = `${content.title} — ${book.title} — Marginalia`;
+    const { book } = loaderData;
+    const title = `${book.title} — Marginalia`;
     const description = `Read ${book.title} by ${book.author} from your own library.`;
     return {
       meta: [
@@ -67,7 +62,6 @@ export const Route = createFileRoute("/read/$bookId")({
         { property: "og:description", content: description },
         { property: "og:type", content: "article" },
         { name: "twitter:card", content: "summary" },
-        // A private library has nothing to gain from being indexed.
         { name: "robots", content: "noindex" },
       ],
     };
@@ -101,11 +95,6 @@ const measures: Record<string, string> = {
   Wide: "max-w-[800px]",
 };
 
-/**
- * Sepia re-points the design tokens for the reader subtree only, so every
- * token-based class inside follows without a second set of components. Night
- * reuses the app's existing `dark` variant the same way.
- */
 const sepiaTokens: Record<string, string> = {
   "--background": "oklch(0.955 0.022 84)",
   "--reading": "oklch(0.978 0.015 86)",
@@ -113,10 +102,31 @@ const sepiaTokens: Record<string, string> = {
   "--foreground": "oklch(0.27 0.016 60)",
 };
 
+function highlightMatchInSnippet(snippet: string, query: string) {
+  if (!query.trim()) return snippet;
+  const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
+  const parts = snippet.split(regex);
+  return parts.map((part, i) =>
+    regex.test(part) ? (
+      <mark key={i} className="bg-accent/30 text-accent font-semibold px-0.5 rounded-2xs">
+        {part}
+      </mark>
+    ) : (
+      part
+    )
+  );
+}
+
 function Reader() {
-  const { book, chapters, content } = Route.useLoaderData();
-  const navigate = useNavigate();
+  const { book, chapters } = Route.useLoaderData();
+  const search = Route.useSearch();
+  const initialChapter = search.chapter ?? 0;
+
   const { save } = useProgress(book.id);
+
+  const [activeIndex, setActiveIndex] = useState(
+    initialChapter >= 0 && initialChapter < chapters.length ? initialChapter : 0
+  );
 
   const [toc, setToc] = useState(false);
   const [type, setType] = useState(false);
@@ -124,6 +134,14 @@ function Reader() {
   const [scope, setScope] = useState<Scope>("chapter");
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+
+  // In-book Keyword Search State
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const [showResultsList, setShowResultsList] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
   const {
     isWide: isSidebarWide,
     isDragging: isSidebarDragging,
@@ -132,6 +150,7 @@ function Reader() {
     toggleWide: toggleSidebarWide,
     asideStyle,
   } = useResizableSidebar();
+
   const [settings, setSettings] = useState<Record<string, string>>({
     Font: "Literata",
     Size: "19",
@@ -140,33 +159,77 @@ function Reader() {
     Theme: "Paper",
   });
 
+  const scrollContainerRef = useRef<HTMLElement>(null);
   const articleRef = useRef<HTMLElement>(null);
+  const chapterRefs = useRef<(HTMLElement | null)[]>([]);
 
-  const index = content.index;
   const total = chapters.length;
-  const fraction = total > 0 ? (index + 1) / total : 0;
+  const currentChapter = chapters[activeIndex] || chapters[0];
+  const fraction = total > 0 ? (activeIndex + 1) / total : 0;
 
-  const router = useRouter();
-
-  // Opening a chapter is what marks it read; there is no scroll tracking behind
-  // this, so the position is honest about being chapter-level.
+  // Save progress initially on mount
   useEffect(() => {
-    save(index, total);
-  }, [save, index, total]);
+    save(activeIndex, total);
+  }, [save, activeIndex, total]);
 
-  // Preload the next chapter in the background so clicking "Next" paints immediately
+  // Initial scroll to targeted chapter if ?chapter= query param was supplied
   useEffect(() => {
-    if (index + 1 < total) {
-      void router.preloadRoute({
-        to: "/read/$bookId",
-        params: { bookId: book.id },
-        search: { chapter: index + 1 },
-      });
+    if (initialChapter > 0 && chapters.length > initialChapter) {
+      const timer = setTimeout(() => {
+        const el = chapterRefs.current[initialChapter];
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 150);
+      return () => clearTimeout(timer);
     }
-  }, [index, total, book.id, router]);
+  }, [initialChapter, chapters.length]);
 
-  // Real text selection, replacing the old click-a-sentence stand-in. Only
-  // selections inside the article body open the toolbar.
+  // Scroll listener: detects active chapter based on reading container scroll position
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || chapters.length === 0) return;
+
+    let ticking = false;
+
+    const handleScroll = () => {
+      if (!ticking) {
+        requestAnimationFrame(() => {
+          const containerTop = container.getBoundingClientRect().top;
+          const targetY = containerTop + 140; // 140px below the header
+
+          let currentIdx = 0;
+          for (let i = 0; i < chapters.length; i++) {
+            const el = chapterRefs.current[i];
+            if (el) {
+              const rect = el.getBoundingClientRect();
+              if (rect.top <= targetY) {
+                currentIdx = i;
+              } else {
+                break;
+              }
+            }
+          }
+
+          setActiveIndex((prev) => {
+            if (prev !== currentIdx) {
+              save(currentIdx, chapters.length);
+              return currentIdx;
+            }
+            return prev;
+          });
+
+          ticking = false;
+        });
+        ticking = true;
+      }
+    };
+
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [chapters.length, save]);
+
+  // Continuous selection listener across single or multi-chapter content
   useEffect(() => {
     const onSelectionChange = () => {
       const selection = window.getSelection();
@@ -175,7 +238,9 @@ function Reader() {
         return;
       }
       const anchor = selection.anchorNode;
-      if (!anchor || !articleRef.current?.contains(anchor)) return;
+      const focus = selection.focusNode;
+      if (!anchor || !focus) return;
+      if (!articleRef.current?.contains(anchor) || !articleRef.current?.contains(focus)) return;
 
       const text = selection.toString().replace(/\s+/g, " ").trim();
       setSelected(text.length > 1 ? text : null);
@@ -185,17 +250,85 @@ function Reader() {
     return () => document.removeEventListener("selectionchange", onSelectionChange);
   }, []);
 
-  // Chapter turns are locations, so the selection from the previous one is stale.
-  useEffect(() => setSelected(null), [index]);
-
-  const goToChapter = (next: number) => {
-    if (next < 0 || next >= total) return;
-    void navigate({
-      to: "/read/$bookId",
-      params: { bookId: book.id },
-      search: { chapter: next },
-    });
+  const scrollToChapter = (targetIndex: number) => {
+    if (targetIndex < 0 || targetIndex >= total) return;
+    const el = chapterRefs.current[targetIndex];
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      setActiveIndex(targetIndex);
+      save(targetIndex, total);
+      setToc(false);
+    }
   };
+
+  interface SearchMatch {
+    chapterIndex: number;
+    chapterTitle: string;
+    snippet: string;
+  }
+
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q || q.length < 2) return [];
+
+    const results: SearchMatch[] = [];
+    chapters.forEach((ch, chIdx) => {
+      const text = ch.markdown || "";
+      const lower = text.toLowerCase();
+      let pos = 0;
+
+      while ((pos = lower.indexOf(q, pos)) !== -1) {
+        const start = Math.max(0, pos - 50);
+        const end = Math.min(text.length, pos + q.length + 50);
+        let snippet = text.slice(start, end).replace(/\s+/g, " ");
+        if (start > 0) snippet = "…" + snippet;
+        if (end < text.length) snippet = snippet + "…";
+
+        results.push({
+          chapterIndex: chIdx,
+          chapterTitle: ch.title,
+          snippet,
+        });
+
+        pos += Math.max(1, q.length);
+        if (results.length >= 250) break;
+      }
+    });
+    return results;
+  }, [searchQuery, chapters]);
+
+  const handleNextMatch = () => {
+    if (searchMatches.length === 0) return;
+    const nextIdx = (currentMatchIndex + 1) % searchMatches.length;
+    setCurrentMatchIndex(nextIdx);
+    scrollToChapter(searchMatches[nextIdx].chapterIndex);
+  };
+
+  const handlePrevMatch = () => {
+    if (searchMatches.length === 0) return;
+    const prevIdx = (currentMatchIndex - 1 + searchMatches.length) % searchMatches.length;
+    setCurrentMatchIndex(prevIdx);
+    scrollToChapter(searchMatches[prevIdx].chapterIndex);
+  };
+
+  const jumpToMatch = (idx: number) => {
+    if (idx < 0 || idx >= searchMatches.length) return;
+    setCurrentMatchIndex(idx);
+    scrollToChapter(searchMatches[idx].chapterIndex);
+  };
+
+  // Keyboard shortcut listener (Ctrl+F, Cmd+F, Ctrl+K)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "k")) {
+        e.preventDefault();
+        setSearchOpen(true);
+        setTimeout(() => searchInputRef.current?.focus(), 60);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const openAskWith = (text: string | null, nextScope: Scope) => {
     setSelected(text);
@@ -231,19 +364,30 @@ function Reader() {
             <p className="truncate text-sm font-medium text-foreground">
               {book.title}
             </p>
-            <p className="truncate text-xs text-faint">{content.title}</p>
+            <p className="truncate text-xs text-faint">
+              {currentChapter?.title || "Reading"}
+            </p>
           </div>
           <span className="hidden font-mono text-2xs text-faint sm:inline">
             {Math.round(fraction * 100)}%
           </span>
+          <IconButton
+            label={searchOpen ? "Close search (Esc)" : "Search in book (Ctrl+F)"}
+            onClick={() => {
+              setSearchOpen((s) => !s);
+              if (!searchOpen) {
+                setTimeout(() => searchInputRef.current?.focus(), 60);
+              }
+            }}
+          >
+            <Search size={18} strokeWidth={1.75} className={searchOpen ? "text-accent" : ""} />
+          </IconButton>
           <IconButton label="Contents" onClick={() => setToc(true)}>
             <List size={18} strokeWidth={1.75} />
           </IconButton>
           <IconButton label="Typography" onClick={() => setType((t) => !t)}>
             <TypeIcon size={18} strokeWidth={1.75} />
           </IconButton>
-          {/* Switching to the scan is useful where the conversion lost a table
-              or a diagram, so it stays one click away while reading. */}
           {hasPdf(book) ? (
             <Link to="/pdf/$bookId" params={{ bookId: book.id }}>
               <IconButton label="View original PDF">
@@ -269,6 +413,125 @@ function Reader() {
         <ProgressBar value={fraction} className="h-[2px]" />
       </header>
 
+      {/* Search Toolbar */}
+      {searchOpen ? (
+        <div className="border-b border-border-subtle bg-surface/95 backdrop-blur px-3 sm:px-4 py-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-xs animate-in slide-in-from-top-2 duration-150 z-20">
+          <div className="flex items-center gap-2 flex-1 max-w-md bg-background border border-border rounded-md px-2.5 py-1 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent/20">
+            <Search size={14} className="text-muted-foreground shrink-0" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentMatchIndex(0);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  if (e.shiftKey) {
+                    handlePrevMatch();
+                  } else {
+                    handleNextMatch();
+                  }
+                } else if (e.key === "Escape") {
+                  setSearchOpen(false);
+                }
+              }}
+              placeholder="Search keyword or phrase in book…"
+              className="w-full bg-transparent text-xs sm:text-sm text-foreground placeholder:text-faint focus:outline-none"
+            />
+            {searchQuery ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery("");
+                  setCurrentMatchIndex(0);
+                }}
+                className="text-faint hover:text-foreground shrink-0 p-0.5 cursor-pointer"
+              >
+                <X size={13} />
+              </button>
+            ) : null}
+          </div>
+
+          <div className="flex items-center justify-between sm:justify-end gap-1.5 shrink-0">
+            {searchQuery.trim() ? (
+              <span className="font-mono text-2xs text-muted-foreground px-1">
+                {searchMatches.length > 0
+                  ? `${currentMatchIndex + 1} of ${searchMatches.length}`
+                  : "No matches"}
+              </span>
+            ) : null}
+
+            <div className="flex items-center gap-0.5">
+              <IconButton
+                label="Previous match (Shift+Enter)"
+                onClick={handlePrevMatch}
+                disabled={searchMatches.length === 0}
+              >
+                <ChevronUp size={15} />
+              </IconButton>
+              <IconButton
+                label="Next match (Enter)"
+                onClick={handleNextMatch}
+                disabled={searchMatches.length === 0}
+              >
+                <ChevronDown size={15} />
+              </IconButton>
+            </div>
+
+            {searchMatches.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => setShowResultsList((prev) => !prev)}
+                className={cn(
+                  "text-2xs font-mono px-2 py-1 rounded-sm border transition-colors flex items-center gap-1 cursor-pointer",
+                  showResultsList
+                    ? "border-accent bg-accent-soft text-accent"
+                    : "border-border text-muted-foreground hover:bg-hover hover:text-foreground"
+                )}
+                title="Toggle search results list"
+              >
+                <List size={12} />
+                <span>Matches</span>
+              </button>
+            ) : null}
+
+            <IconButton label="Close search (Esc)" onClick={() => setSearchOpen(false)}>
+              <X size={16} />
+            </IconButton>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Expandable Search Results Drawer with snippets */}
+      {searchOpen && showResultsList && searchMatches.length > 0 ? (
+        <div className="border-b border-border bg-background/95 backdrop-blur max-h-60 overflow-y-auto z-20 px-3 sm:px-6 py-2 divide-y divide-border-subtle shadow-md">
+          {searchMatches.map((m, idx) => (
+            <button
+              key={idx}
+              type="button"
+              onClick={() => jumpToMatch(idx)}
+              className={cn(
+                "w-full text-left py-2 px-2.5 rounded-sm transition-colors text-xs flex flex-col gap-1 cursor-pointer",
+                idx === currentMatchIndex
+                  ? "bg-accent-soft/40 border-l-2 border-accent"
+                  : "hover:bg-hover"
+              )}
+            >
+              <div className="flex items-center justify-between text-2xs text-accent font-medium">
+                <span>{m.chapterTitle}</span>
+                <span className="font-mono text-faint">Match {idx + 1}</span>
+              </div>
+              <p className="text-foreground/80 line-clamp-2 font-serif">
+                {highlightMatchInSnippet(m.snippet, searchQuery)}
+              </p>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {/* Typography settings bar */}
       {type ? (
         <div className="border-b border-border-subtle bg-surface">
           <div className="mx-auto flex max-w-[700px] flex-wrap gap-6 px-6 py-4">
@@ -285,7 +548,7 @@ function Reader() {
                         setSettings((p) => ({ ...p, [s.label]: o }))
                       }
                       className={cn(
-                        "rounded-xs border px-2 py-1 text-2xs transition-colors",
+                        "rounded-xs border px-2 py-1 text-2xs transition-colors cursor-pointer",
                         settings[s.label] === o
                           ? "border-accent bg-accent-soft text-accent"
                           : "border-border text-muted-foreground hover:bg-hover",
@@ -301,10 +564,13 @@ function Reader() {
         </div>
       ) : null}
 
-      {/* Split Workspace: Section 1 (Reading) + Section 2 (AI Sidebar) */}
+      {/* Split Workspace: Section 1 (Continuous Reader) + Section 2 (AI Sidebar) */}
       <div className="flex min-h-0 flex-1 relative overflow-hidden">
-        {/* SECTION 1: Book Reading Section (Fluidly auto-adjusting, independent scroll) */}
-        <main className="min-w-0 flex-1 h-full overflow-y-auto overflow-x-hidden">
+        {/* SECTION 1: Book Reading Section (Continuous scroll down through all chapters) */}
+        <main
+          ref={scrollContainerRef}
+          className="min-w-0 flex-1 h-full overflow-y-auto overflow-x-hidden scroll-smooth"
+        >
           <article
             ref={articleRef}
             className={cn(
@@ -312,57 +578,98 @@ function Reader() {
               measures[settings["Width"] ?? "Standard"],
             )}
           >
-            <p className="mb-2 text-2xs uppercase tracking-[0.1em] text-faint">
-              Chapter {index + 1} of {total}
-            </p>
-            <h1 className="mb-9 font-serif text-3xl font-semibold leading-[1.2] tracking-[-0.015em] text-foreground">
-              {content.title}
-            </h1>
+            {chapters.length > 0 ? (
+              chapters.map((ch, i) => (
+                <section
+                  key={ch.id}
+                  id={`chapter-${i}`}
+                  data-chapter-index={i}
+                  ref={(el) => {
+                    chapterRefs.current[i] = el;
+                  }}
+                  className={cn(
+                    "relative scroll-mt-20",
+                    i > 0 ? "pt-20 mt-20 border-t border-border-subtle" : "mb-16"
+                  )}
+                >
+                  <div className="mb-8">
+                    <div className="flex items-center gap-2 mb-2.5">
+                      <span className="font-mono text-2xs uppercase tracking-[0.12em] text-accent font-semibold">
+                        Chapter {i + 1} of {total}
+                      </span>
+                      <span className="text-3xs text-faint font-mono">·</span>
+                      <span className="text-3xs text-faint font-mono">
+                        {formatMinutes(ch.words / WORDS_PER_MINUTE)} read
+                      </span>
+                    </div>
+                    <h2 className="font-serif text-3xl sm:text-4xl font-semibold leading-[1.2] tracking-[-0.015em] text-foreground">
+                      {ch.title}
+                    </h2>
+                  </div>
 
-            {content.words > 0 ? (
-              <Streamdown
-                mode="static"
-                // The chapter is complete text, not a stream: no missing
-                // delimiters to repair, and no copy/download chrome wanted.
-                parseIncompleteMarkdown={false}
-                controls={false}
-                className="prose-book"
-              >
-                {content.markdown}
-              </Streamdown>
+                  {ch.words > 0 ? (
+                    <Streamdown
+                      mode="static"
+                      parseIncompleteMarkdown={false}
+                      controls={false}
+                      className="prose-book"
+                    >
+                      {ch.markdown}
+                    </Streamdown>
+                  ) : (
+                    <p className="text-sm text-muted-foreground italic py-4">
+                      This section has no text — the conversion produced only a heading here.
+                    </p>
+                  )}
+                </section>
+              ))
             ) : (
-              <p className="text-sm text-muted-foreground">
-                This section has no text — the conversion produced only a
-                heading here.
-              </p>
+              <div className="py-20 text-center space-y-3">
+                <p className="font-serif text-xl font-medium text-foreground">
+                  No markdown chapters available for this book.
+                </p>
+                {hasPdf(book) && (
+                  <Link to="/pdf/$bookId" params={{ bookId: book.id }}>
+                    <Button variant="primary">Open PDF Viewer</Button>
+                  </Link>
+                )}
+              </div>
             )}
 
-            <nav className="mt-14 flex items-center justify-between gap-4 border-t border-border-subtle pt-5 text-sm">
-              <Button
-                size="sm"
-                variant="tertiary"
-                disabled={index === 0}
-                onClick={() => goToChapter(index - 1)}
-              >
-                <ChevronLeft size={14} strokeWidth={1.75} />
-                Previous
-              </Button>
-              <span className="text-faint">
-                {formatMinutes(content.words / WORDS_PER_MINUTE)} in this chapter
-              </span>
-              <Button
-                size="sm"
-                variant="tertiary"
-                disabled={index >= total - 1}
-                onClick={() => goToChapter(index + 1)}
-              >
-                Next
-                <ChevronRight size={14} strokeWidth={1.75} />
-              </Button>
-            </nav>
+            {/* End of Book Milestone */}
+            {chapters.length > 0 && (
+              <div className="mt-28 border-t border-border-subtle pt-14 text-center space-y-4">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-accent-soft text-accent border border-accent/20 shadow-2xs">
+                  <CheckCircle2 size={22} />
+                </div>
+                <h3 className="font-serif text-2xl font-medium text-foreground">
+                  End of {book.title}
+                </h3>
+                <p className="text-xs text-muted-foreground max-w-sm mx-auto leading-relaxed">
+                  You've reached the end of all {total} chapters. Review your highlights, synthesize insights across books, or ask the AI agent.
+                </p>
+                <div className="flex items-center justify-center gap-3 pt-2">
+                  <Link to="/book/$bookId" params={{ bookId: book.id }}>
+                    <Button variant="secondary" size="sm">
+                      Book Overview
+                    </Button>
+                  </Link>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => openAskWith(null, "book")}
+                    className="gap-1.5"
+                  >
+                    <MessageSquareQuote size={14} />
+                    <span>Ask About This Book</span>
+                  </Button>
+                </div>
+              </div>
+            )}
           </article>
         </main>
 
+        {/* SECTION 2: Ask AI Sidebar */}
         {ask ? (
           <>
             {/* Mobile backdrop */}
@@ -384,8 +691,8 @@ function Reader() {
                 onDoubleClick={resetSidebarWidth}
                 isDragging={isSidebarDragging}
               />
-              <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3 shrink-0">
-                <span className="text-sm font-medium text-foreground">Ask</span>
+              <header className="flex items-center justify-between px-4 py-3 shrink-0">
+                <span className="text-sm font-medium text-foreground">Ask AI</span>
                 <div className="flex items-center gap-1">
                   <IconButton
                     label={isSidebarWide ? "Collapse width" : "Expand width"}
@@ -403,7 +710,13 @@ function Reader() {
                 <AskBody
                   scope={scope}
                   setScope={setScope}
-                  contextDetail={`${content.title} · chapter ${index + 1} of ${total}`}
+                  contextDetail={
+                    selected
+                      ? `Selected passage (${selected.length} chars)`
+                      : `${currentChapter?.title ?? book.title} · chapter ${activeIndex + 1} of ${total}`
+                  }
+                  activeBookId={book.id}
+                  activeBookTitle={book.title}
                   {...(selected ? { contextPassage: selected } : {})}
                   answer={answer}
                   setAnswer={setAnswer}
@@ -415,37 +728,26 @@ function Reader() {
         ) : null}
       </div>
 
-      {/* Selection toolbar. mousedown is prevented so clicking a button does not
-          collapse the selection out from under it. */}
+      {/* Floating Selection toolbar for continuous single & multi-chapter selections */}
       {selected && !ask ? (
         <div
-          className="fixed bottom-8 left-1/2 z-30 -translate-x-1/2"
+          className="fixed bottom-8 left-1/2 z-30 -translate-x-1/2 animate-in fade-in slide-in-from-bottom-2 duration-150"
           onMouseDown={(e) => e.preventDefault()}
         >
-          <div className="flex items-center gap-1 rounded-sm border border-border bg-reading p-1 shadow-panel">
+          <div className="flex items-center gap-1.5 rounded-full border border-border bg-reading/95 backdrop-blur-md px-2 py-1 shadow-lg">
             <Button
               size="sm"
-              variant="tertiary"
-              disabled
-              title="Saving highlights needs a store behind it — not wired up yet"
+              variant="primary"
+              onClick={() => openAskWith(selected, "selection")}
+              className="gap-1 text-xs h-7 rounded-full"
             >
-              Highlight
+              <MessageSquareQuote size={13} strokeWidth={2} />
+              <span>Ask AI</span>
             </Button>
             <Button
               size="sm"
-              variant="tertiary"
-              disabled
-              title="Saving notes needs a store behind it — not wired up yet"
-            >
-              Note
-            </Button>
-            <Button size="sm" onClick={() => openAskWith(selected, "selection")}>
-              <MessageSquareQuote size={14} strokeWidth={1.75} />
-              Ask
-            </Button>
-            <Button
-              size="sm"
-              variant="tertiary"
+              variant="secondary"
+              className="text-xs h-7 rounded-full"
               onClick={() => {
                 void navigator.clipboard?.writeText(selected);
                 setSelected(null);
@@ -456,23 +758,24 @@ function Reader() {
             <IconButton
               label="Dismiss selection"
               onClick={() => setSelected(null)}
+              className="h-7 w-7 rounded-full hover:bg-hover"
             >
-              <X size={15} strokeWidth={1.75} />
+              <X size={13} strokeWidth={2} />
             </IconButton>
           </div>
         </div>
       ) : null}
 
-      {/* Contents slide-over */}
+      {/* Contents (Table of Contents) slide-over with direct smooth-scroll */}
       {toc ? (
         <>
           <button
             aria-label="Close contents"
-            className="fixed inset-0 z-40 bg-foreground/15"
+            className="fixed inset-0 z-40 bg-foreground/15 backdrop-blur-xs cursor-pointer"
             onClick={() => setToc(false)}
           />
-          <aside className="fixed inset-y-0 left-0 z-50 w-full max-w-[340px] overflow-y-auto border-r border-border bg-background">
-            <header className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
+          <aside className="fixed inset-y-0 left-0 z-50 w-full max-w-[340px] overflow-y-auto border-r border-border bg-background shadow-panel animate-in slide-in-from-left duration-200">
+            <header className="flex items-center justify-between px-4 py-3 shrink-0">
               <span className="text-sm font-medium text-foreground">
                 Contents
               </span>
@@ -480,34 +783,27 @@ function Reader() {
                 <X size={16} strokeWidth={1.75} />
               </IconButton>
             </header>
-            <ul className="px-2 py-2">
+            <ul className="px-2 py-2 space-y-0.5">
               {chapters.map((c, i) => (
                 <li key={c.id}>
-                  <Link
-                    to="/read/$bookId"
-                    params={{ bookId: book.id }}
-                    search={{ chapter: i }}
-                    onClick={() => setToc(false)}
+                  <button
+                    type="button"
+                    onClick={() => scrollToChapter(i)}
                     className={cn(
-                      "flex w-full items-baseline gap-3 rounded-sm px-2.5 py-2.5 text-left transition-colors hover:bg-hover",
-                      i === index && "bg-active",
+                      "flex w-full items-baseline gap-3 rounded-md px-2.5 py-2.5 text-left transition-colors hover:bg-hover cursor-pointer",
+                      i === activeIndex ? "bg-accent-soft/50 text-accent font-medium" : "text-foreground",
                     )}
                   >
-                    <span className="font-mono text-2xs text-faint">
+                    <span className="font-mono text-2xs text-faint shrink-0">
                       {String(i + 1).padStart(2, "0")}
                     </span>
-                    <span
-                      className={cn(
-                        "min-w-0 flex-1 font-serif text-sm",
-                        i === index ? "text-accent" : "text-foreground",
-                      )}
-                    >
+                    <span className="min-w-0 flex-1 font-serif text-sm truncate">
                       {c.title}
                     </span>
-                    <span className="text-2xs text-faint">
+                    <span className="text-2xs text-faint font-mono shrink-0">
                       {Math.max(1, Math.round(c.words / WORDS_PER_MINUTE))}m
                     </span>
-                  </Link>
+                  </button>
                 </li>
               ))}
             </ul>

@@ -183,6 +183,34 @@ export async function loadBookDetail(bookId: string): Promise<BookDetail | null>
   return { book, chapters: parsed.chapters, totalWords: parsed.totalWords };
 }
 
+export type BookChapterWithContent = BookChapter & {
+  index: number;
+  markdown: string;
+};
+
+export async function loadBookFullContent(bookId: string): Promise<{
+  book: LibraryBook;
+  chapters: BookChapterWithContent[];
+  totalWords: number;
+} | null> {
+  const book = await findBook(bookId);
+  if (!book) return null;
+
+  // A PDF-only book has no chapters to parse
+  if (book.markdownObject === null) return { book, chapters: [], totalWords: 0 };
+
+  const parsed = await loadParsedBook(book);
+  if (!parsed) return null;
+
+  const chapters: BookChapterWithContent[] = parsed.chapters.map((ch, index) => ({
+    ...ch,
+    index,
+    markdown: parsed.contents[index] ?? "",
+  }));
+
+  return { book, chapters, totalWords: parsed.totalWords };
+}
+
 /** Null when the book has no PDF, so the caller can 404 rather than guess. */
 export async function loadPdfUrl(bookId: string): Promise<string | null> {
   const book = await findBook(bookId);

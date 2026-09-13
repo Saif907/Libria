@@ -2,10 +2,13 @@ import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { useEffect, useRef, useState, useCallback, memo } from "react";
 import {
   ArrowLeft,
+  ArrowRight,
+  Check,
   ChevronDown,
   ChevronUp,
   Copy,
   FileText,
+  List,
   Loader2,
   Maximize2,
   MessageSquareQuote,
@@ -13,6 +16,7 @@ import {
   Minus,
   Plus,
   RotateCcw,
+  Search,
   Sparkles,
   X,
 } from "lucide-react";
@@ -119,8 +123,15 @@ const LazyPdfPage = memo(function LazyPdfPage({
 
   const handleHoldTrigger = useCallback(() => {
     if (!canvasRef.current || !onSelectPage) return;
-    if (typeof navigator !== "undefined" && navigator.vibrate) {
-      navigator.vibrate(40);
+    if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+      try {
+        const canVibrate = !(navigator as any).userActivation || (navigator as any).userActivation?.isActive;
+        if (canVibrate) {
+          navigator.vibrate(40);
+        }
+      } catch {
+        // Safe fallback if blocked by browser activation policy
+      }
     }
     onSelectPage(pageNumber, canvasRef.current);
   }, [pageNumber, onSelectPage]);
@@ -289,9 +300,9 @@ const LazyPdfPage = memo(function LazyPdfPage({
           : "border-border-subtle hover:border-accent/40"
       )}
     >
-      {/* Floating Page Quick-Action Pill (Hover on desktop, or easily tapped) */}
+      {/* Floating Page Quick-Action Pill (Always accessible on mobile, hover on desktop) */}
       {rendered ? (
-        <div className="absolute top-2.5 right-2.5 z-10 opacity-80 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-150 pointer-events-auto">
+        <div className="absolute top-2.5 right-2.5 z-10 opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-150 pointer-events-auto">
           <button
             type="button"
             onClick={(e) => {
@@ -299,15 +310,19 @@ const LazyPdfPage = memo(function LazyPdfPage({
               handleHoldTrigger();
             }}
             className={cn(
-              "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-2xs font-medium shadow-md backdrop-blur-sm transition-all cursor-pointer",
+              "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-2xs font-medium shadow-md backdrop-blur-sm transition-all cursor-pointer active:scale-95",
               isSelected
                 ? "bg-accent text-accent-foreground ring-1 ring-accent"
                 : "bg-background/90 text-foreground border border-border hover:bg-accent hover:text-accent-foreground"
             )}
-            title={`Ask AI about Page ${pageNumber}`}
+            title={isSelected ? `Deselect Page ${pageNumber}` : `Select Page ${pageNumber} for Ask AI`}
           >
-            <Sparkles size={11} className={isSelected ? "fill-current" : "text-accent"} />
-            <span>{isSelected ? `Page ${pageNumber} Attached` : `Ask Page ${pageNumber}`}</span>
+            {isSelected ? (
+              <Check size={11} strokeWidth={2.5} className="text-accent-foreground" />
+            ) : (
+              <Plus size={11} strokeWidth={2} className="text-accent" />
+            )}
+            <span>{isSelected ? `Page ${pageNumber} Selected` : `Select Page ${pageNumber}`}</span>
           </button>
         </div>
       ) : null}
@@ -335,6 +350,21 @@ const LazyPdfPage = memo(function LazyPdfPage({
   );
 });
 
+function highlightMatchInSnippet(snippet: string, query: string) {
+  if (!query.trim()) return snippet;
+  const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi");
+  const parts = snippet.split(regex);
+  return parts.map((part, i) =>
+    regex.test(part) ? (
+      <mark key={i} className="bg-accent/30 text-accent font-semibold px-0.5 rounded-2xs">
+        {part}
+      </mark>
+    ) : (
+      part
+    )
+  );
+}
+
 function ContinuousPdfViewer() {
   const { book, url } = Route.useLoaderData();
 
@@ -351,34 +381,84 @@ function ContinuousPdfViewer() {
   const [scale, setScale] = useState<number>(1.0);
   const [baseWidth, setBaseWidth] = useState<number>(760);
 
-  // AI Ask Panel state
+  // AI Ask Panel state (supports multi-page attachments)
   const [ask, setAsk] = useState<boolean>(false);
   const [scope, setScope] = useState<Scope>("page");
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [selectedText, setSelectedText] = useState<string | null>(null);
-  const [attachedPage, setAttachedPage] = useState<AttachedPageContext | null>(null);
+  const [attachedPages, setAttachedPages] = useState<AttachedPageContext[]>([]);
 
-  // Capture whole page photo snapshot
-  const handleSelectPage = useCallback(
-    (pageNum: number, canvas: HTMLCanvasElement) => {
+  // Keyword Search State
+  const [searchOpen, setSearchOpen] = useState<boolean>(false);
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [currentMatchIndex, setCurrentMatchIndex] = useState<number>(0);
+  const [pdfMatches, setPdfMatches] = useState<{ pageNumber: number; snippet: string }[]>([]);
+  const [isSearching, setIsSearching] = useState<boolean>(false);
+  const [showResultsList, setShowResultsList] = useState<boolean>(false);
+  const pageTextCacheRef = useRef<Map<number, string>>(new Map());
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Capture whole page snapshot (photo + text) and toggle in attached pages list
+  const handleTogglePage = useCallback(
+    async (pageNum: number, canvas?: HTMLCanvasElement | null) => {
       try {
-        const imageUrl = canvas.toDataURL("image/jpeg", 0.85);
+        const isAlreadyAttached = attachedPages.some((p) => p.pageNumber === pageNum);
+        if (isAlreadyAttached) {
+          setAttachedPages((prev) => prev.filter((p) => p.pageNumber !== pageNum));
+          toast.info(`Deselected Page ${pageNum}`);
+          return;
+        }
+
+        let imageUrl = "";
+        const targetCanvas =
+          canvas ||
+          (document.querySelector(`#pdf-page-${pageNum} canvas`) as HTMLCanvasElement | null);
+        if (targetCanvas) {
+          // Optimized compression for multimodal vision (lightweight base64)
+          imageUrl = targetCanvas.toDataURL("image/jpeg", 0.78);
+        }
+
+        let extractedText: string | undefined = undefined;
+        if (pdfDoc) {
+          try {
+            const page = await pdfDoc.getPage(pageNum);
+            const textContent = await page.getTextContent();
+            const rawText = textContent.items
+              .map((item: any) => item.str || "")
+              .join(" ")
+              .replace(/\s+/g, " ")
+              .trim();
+
+            if (rawText.length > 0) {
+              extractedText = rawText;
+            }
+          } catch (textErr) {
+            console.warn("Could not extract page text from PDF", textErr);
+          }
+        }
+
         const pageCtx: AttachedPageContext = {
           pageNumber: pageNum,
           imageUrl,
           bookTitle: book.title,
           bookId: book.id,
+          pageText: extractedText,
         };
-        setAttachedPage(pageCtx);
+
+        setAttachedPages((prev) => [...prev, pageCtx]);
         setScope("page");
-        setAsk(true);
-        toast.success(`Attached Page ${pageNum} photo to Ask AI`);
+        const nextCount = attachedPages.length + 1;
+        toast.success(
+          nextCount === 1
+            ? `Page ${pageNum} selected for Ask AI`
+            : `Added Page ${pageNum} (${nextCount} pages selected)`
+        );
       } catch (err) {
         console.error("Failed to capture page snapshot", err);
         toast.error("Could not capture page photo");
       }
     },
-    [book.title, book.id]
+    [attachedPages, book.title, book.id, pdfDoc]
   );
 
   const {
@@ -479,6 +559,115 @@ function ContinuousPdfViewer() {
     setPageInput(String(page));
   }, []);
 
+  // Asynchronous PDF Text Search across pages
+  useEffect(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q || q.length < 2 || !pdfDoc) {
+      setPdfMatches([]);
+      setCurrentMatchIndex(0);
+      setIsSearching(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsSearching(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const results: { pageNumber: number; snippet: string }[] = [];
+
+        for (let p = 1; p <= numPages; p++) {
+          if (cancelled) break;
+
+          let text = pageTextCacheRef.current.get(p);
+          if (!text) {
+            try {
+              const page = await pdfDoc.getPage(p);
+              const content = await page.getTextContent();
+              text = content.items
+                .map((it: any) => it.str || "")
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .trim();
+              pageTextCacheRef.current.set(p, text);
+            } catch {
+              text = "";
+            }
+          }
+
+          const lower = text.toLowerCase();
+          let pos = 0;
+          while ((pos = lower.indexOf(q, pos)) !== -1) {
+            const start = Math.max(0, pos - 50);
+            const end = Math.min(text.length, pos + q.length + 50);
+            let snippet = text.slice(start, end);
+            if (start > 0) snippet = "…" + snippet;
+            if (end < text.length) snippet = snippet + "…";
+
+            results.push({
+              pageNumber: p,
+              snippet,
+            });
+
+            pos += Math.max(1, q.length);
+            if (results.length >= 100) break;
+          }
+
+          if (results.length >= 100) break;
+        }
+
+        if (!cancelled) {
+          setPdfMatches(results);
+          setCurrentMatchIndex(0);
+          setIsSearching(false);
+          if (results.length > 0) {
+            scrollToPage(results[0].pageNumber);
+          }
+        }
+      } catch (err) {
+        if (!cancelled) setIsSearching(false);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery, pdfDoc, numPages]);
+
+  const handleNextMatch = () => {
+    if (pdfMatches.length === 0) return;
+    const nextIdx = (currentMatchIndex + 1) % pdfMatches.length;
+    setCurrentMatchIndex(nextIdx);
+    scrollToPage(pdfMatches[nextIdx].pageNumber);
+  };
+
+  const handlePrevMatch = () => {
+    if (pdfMatches.length === 0) return;
+    const prevIdx = (currentMatchIndex - 1 + pdfMatches.length) % pdfMatches.length;
+    setCurrentMatchIndex(prevIdx);
+    scrollToPage(pdfMatches[prevIdx].pageNumber);
+  };
+
+  const jumpToMatch = (idx: number) => {
+    if (idx < 0 || idx >= pdfMatches.length) return;
+    setCurrentMatchIndex(idx);
+    scrollToPage(pdfMatches[idx].pageNumber);
+  };
+
+  // Keyboard shortcut listener (Ctrl+F, Cmd+F, Ctrl+K)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "k")) {
+        e.preventDefault();
+        setSearchOpen(true);
+        setTimeout(() => searchInputRef.current?.focus(), 60);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // 4. Capture Text Selection for AI Ask Context & Clipboard
   useEffect(() => {
     const onSelectionChange = () => {
@@ -516,6 +705,19 @@ function ContinuousPdfViewer() {
         </div>
 
         <div className="flex items-center gap-1 sm:gap-2">
+          {/* Keyword Search Button */}
+          <IconButton
+            label={searchOpen ? "Close search (Esc)" : "Search in PDF (Ctrl+F)"}
+            onClick={() => {
+              setSearchOpen((s) => !s);
+              if (!searchOpen) {
+                setTimeout(() => searchInputRef.current?.focus(), 60);
+              }
+            }}
+          >
+            <Search size={17} strokeWidth={1.75} className={searchOpen ? "text-accent" : ""} />
+          </IconButton>
+
           {/* Zoom Controls */}
           <div className="flex items-center gap-0.5 border border-border-subtle rounded-sm p-0.5">
             <IconButton
@@ -559,13 +761,141 @@ function ContinuousPdfViewer() {
             size="sm"
             variant={ask ? "primary" : "secondary"}
             onClick={() => setAsk((p) => !p)}
-            className="gap-1.5 text-xs"
+            className="gap-1.5 text-xs relative"
           >
             <MessageSquareQuote size={14} strokeWidth={1.75} />
             <span className="hidden xs:inline">Ask AI</span>
+            {attachedPages.length > 0 && !ask ? (
+              <span className="rounded-full bg-accent text-accent-foreground font-mono text-[10px] px-1.5 py-0.2 min-w-[17px] text-center font-bold shadow-xs">
+                {attachedPages.length}
+              </span>
+            ) : null}
           </Button>
         </div>
       </header>
+
+      {/* Search Toolbar */}
+      {searchOpen ? (
+        <div className="border-b border-border-subtle bg-surface/95 backdrop-blur px-3 sm:px-4 py-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shadow-xs animate-in slide-in-from-top-2 duration-150 z-20">
+          <div className="flex items-center gap-2 flex-1 max-w-md bg-background border border-border rounded-md px-2.5 py-1 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent/20">
+            <Search size={14} className="text-muted-foreground shrink-0" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentMatchIndex(0);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  if (e.shiftKey) {
+                    handlePrevMatch();
+                  } else {
+                    handleNextMatch();
+                  }
+                } else if (e.key === "Escape") {
+                  setSearchOpen(false);
+                }
+              }}
+              placeholder="Search keyword or phrase in PDF…"
+              className="w-full bg-transparent text-xs sm:text-sm text-foreground placeholder:text-faint focus:outline-none"
+            />
+            {isSearching ? (
+              <Loader2 size={13} className="animate-spin text-accent shrink-0" />
+            ) : searchQuery ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery("");
+                  setCurrentMatchIndex(0);
+                  setPdfMatches([]);
+                }}
+                className="text-faint hover:text-foreground shrink-0 p-0.5 cursor-pointer"
+              >
+                <X size={13} />
+              </button>
+            ) : null}
+          </div>
+
+          <div className="flex items-center justify-between sm:justify-end gap-1.5 shrink-0">
+            {searchQuery.trim() ? (
+              <span className="font-mono text-2xs text-muted-foreground px-1">
+                {isSearching
+                  ? "Scanning pages…"
+                  : pdfMatches.length > 0
+                  ? `${currentMatchIndex + 1} of ${pdfMatches.length} (Page ${pdfMatches[currentMatchIndex]?.pageNumber})`
+                  : "No matches"}
+              </span>
+            ) : null}
+
+            <div className="flex items-center gap-0.5">
+              <IconButton
+                label="Previous match (Shift+Enter)"
+                onClick={handlePrevMatch}
+                disabled={pdfMatches.length === 0}
+              >
+                <ChevronUp size={15} />
+              </IconButton>
+              <IconButton
+                label="Next match (Enter)"
+                onClick={handleNextMatch}
+                disabled={pdfMatches.length === 0}
+              >
+                <ChevronDown size={15} />
+              </IconButton>
+            </div>
+
+            {pdfMatches.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => setShowResultsList((prev) => !prev)}
+                className={cn(
+                  "text-2xs font-mono px-2 py-1 rounded-sm border transition-colors flex items-center gap-1 cursor-pointer",
+                  showResultsList
+                    ? "border-accent bg-accent-soft text-accent"
+                    : "border-border text-muted-foreground hover:bg-hover hover:text-foreground"
+                )}
+                title="Toggle search results list"
+              >
+                <List size={12} />
+                <span>Matches</span>
+              </button>
+            ) : null}
+
+            <IconButton label="Close search (Esc)" onClick={() => setSearchOpen(false)}>
+              <X size={16} />
+            </IconButton>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Expandable Search Results Drawer with snippets */}
+      {searchOpen && showResultsList && pdfMatches.length > 0 ? (
+        <div className="border-b border-border bg-background/95 backdrop-blur max-h-60 overflow-y-auto z-20 px-3 sm:px-6 py-2 divide-y divide-border-subtle shadow-md">
+          {pdfMatches.map((m, idx) => (
+            <button
+              key={idx}
+              type="button"
+              onClick={() => jumpToMatch(idx)}
+              className={cn(
+                "w-full text-left py-2 px-2.5 rounded-sm transition-colors text-xs flex flex-col gap-1 cursor-pointer",
+                idx === currentMatchIndex
+                  ? "bg-accent-soft/40 border-l-2 border-accent"
+                  : "hover:bg-hover"
+              )}
+            >
+              <div className="flex items-center justify-between text-2xs text-accent font-medium">
+                <span>Page {m.pageNumber}</span>
+                <span className="font-mono text-faint">Match {idx + 1}</span>
+              </div>
+              <p className="text-foreground/80 line-clamp-2">
+                {highlightMatchInSnippet(m.snippet, searchQuery)}
+              </p>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {/* Main Workspace */}
       <div className="flex min-h-0 flex-1 relative overflow-hidden">
@@ -591,8 +921,8 @@ function ContinuousPdfViewer() {
                   scale={scale}
                   aspectRatio={aspectRatio}
                   onVisible={handlePageVisible}
-                  onSelectPage={handleSelectPage}
-                  isSelected={attachedPage?.pageNumber === pageNum}
+                  onSelectPage={handleTogglePage}
+                  isSelected={attachedPages.some((p) => p.pageNumber === pageNum)}
                 />
               ))}
             </div>
@@ -685,20 +1015,107 @@ function ContinuousPdfViewer() {
                   type="button"
                   onClick={() => {
                     const canvas = document.querySelector(`#pdf-page-${activePage} canvas`) as HTMLCanvasElement | null;
-                    if (canvas) {
-                      handleSelectPage(activePage, canvas);
-                    } else {
-                      setScope("page");
-                      setAsk(true);
-                    }
+                    void handleTogglePage(activePage, canvas);
                   }}
-                  className="flex items-center gap-1 text-2xs text-muted-foreground hover:text-accent font-medium transition-colors px-1 py-0.5 cursor-pointer"
-                  title={`Ask about Page ${activePage}`}
+                  className={cn(
+                    "flex items-center gap-1.5 text-2xs font-medium transition-colors px-2 py-0.5 rounded-full cursor-pointer",
+                    attachedPages.some((p) => p.pageNumber === activePage)
+                      ? "bg-accent/15 text-accent font-semibold"
+                      : "text-muted-foreground hover:text-foreground hover:bg-surface"
+                  )}
+                  title={`Attach or detach Page ${activePage} for Ask AI`}
                 >
-                  <Sparkles size={12} className="text-accent" />
-                  <span className="hidden sm:inline">Ask Page {activePage}</span>
+                  {attachedPages.some((p) => p.pageNumber === activePage) ? (
+                    <Check size={12} strokeWidth={2.5} className="text-accent" />
+                  ) : (
+                    <Plus size={12} strokeWidth={2} className="text-muted-foreground" />
+                  )}
+                  <span>
+                    {attachedPages.some((p) => p.pageNumber === activePage)
+                      ? `Page ${activePage}`
+                      : `Select P.${activePage}`}
+                  </span>
+                  {attachedPages.length > 0 && (
+                    <span className="rounded-full bg-accent text-accent-foreground font-mono text-[10px] px-1.5 py-0.2 min-w-[16px] text-center font-bold">
+                      {attachedPages.length}
+                    </span>
+                  )}
                 </button>
               </nav>
+            </div>
+          ) : null}
+
+          {/* Floating Multi-Page Action Dock (Seamless Mobile & Desktop Selection) */}
+          {attachedPages.length > 0 && !ask ? (
+            <div
+              className={cn(
+                "fixed left-1/2 -translate-x-1/2 z-35 w-[calc(100%-1.25rem)] max-w-md pointer-events-none transition-all duration-200 animate-in fade-in slide-in-from-bottom-3",
+                selectedText ? "bottom-28 sm:bottom-32" : "bottom-16 sm:bottom-18"
+              )}
+            >
+              <div className="pointer-events-auto flex items-center justify-between gap-2 rounded-full border border-accent/40 bg-background/95 p-1.5 pl-3 shadow-2xl backdrop-blur-md ring-1 ring-accent/25">
+                {/* Attached Page Chips & Count */}
+                <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground shrink-0">
+                    <Sparkles size={13} className="text-accent fill-accent" />
+                    <span>{attachedPages.length}</span>
+                    <span className="hidden xs:inline text-muted-foreground font-normal text-2xs">
+                      {attachedPages.length === 1 ? "page" : "pages"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden py-0.5 min-w-0">
+                    {attachedPages
+                      .slice()
+                      .sort((a, b) => a.pageNumber - b.pageNumber)
+                      .map((page) => (
+                        <span
+                          key={page.pageNumber}
+                          className="inline-flex items-center gap-1 rounded-full bg-surface border border-border px-2 py-0.5 text-2xs font-mono text-muted-foreground shrink-0 hover:border-destructive/40 transition-colors"
+                        >
+                          <span>p.{page.pageNumber}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleTogglePage(page.pageNumber);
+                            }}
+                            className="hover:text-destructive text-muted-foreground/70 rounded-full transition-colors cursor-pointer"
+                            title={`Deselect page ${page.pageNumber}`}
+                          >
+                            <X size={10} strokeWidth={2.5} />
+                          </button>
+                        </span>
+                      ))}
+                  </div>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAttachedPages([]);
+                      toast.info("Cleared selected pages");
+                    }}
+                    className="px-2 py-1 text-2xs text-muted-foreground hover:text-foreground hover:bg-surface rounded-full transition-colors cursor-pointer"
+                    title="Clear all selections"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScope("page");
+                      setAsk(true);
+                    }}
+                    className="flex items-center gap-1.5 rounded-full bg-accent text-accent-foreground px-3.5 py-1.5 text-xs font-semibold shadow-sm hover:opacity-95 active:scale-95 transition-all cursor-pointer"
+                  >
+                    <span>Ask AI</span>
+                    <ArrowRight size={13} strokeWidth={2.5} />
+                  </button>
+                </div>
+              </div>
             </div>
           ) : null}
         </main>
@@ -748,9 +1165,18 @@ function ContinuousPdfViewer() {
                   scope={scope}
                   setScope={setScope}
                   contextDetail={contextDetail}
+                  activeBookId={book.id}
+                  activeBookTitle={book.title}
                   {...(selectedText && scope === "selection" ? { contextPassage: selectedText } : {})}
-                  attachedPage={attachedPage ?? undefined}
-                  onClearPage={() => setAttachedPage(null)}
+                  attachedPages={attachedPages}
+                  onClearPage={(pNum) => {
+                    if (pNum) {
+                      setAttachedPages((prev) => prev.filter((p) => p.pageNumber !== pNum));
+                    } else {
+                      setAttachedPages([]);
+                    }
+                  }}
+                  onClearAllPages={() => setAttachedPages([])}
                   answer={answer}
                   setAnswer={setAnswer}
                   availableScopes={["selection", "page", "book", "library"]}
