@@ -630,11 +630,31 @@ function ChatWorkspacePage() {
 
   // Session Actions
   const handleNewChat = async () => {
+    // 1. If currently in a new chat with 0 messages, do not create another one
+    if (activeSession && activeSession.messages.length === 0) {
+      setSelectedBooks([]);
+      setSelectedCategories([]);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    // 2. If an empty session already exists in the list, switch to it instead of creating duplicates
+    const existingEmpty = sessions.find((s) => s.messages.length === 0);
+    if (existingEmpty) {
+      setActiveSessionId(existingEmpty.id);
+      setSelectedBooks([]);
+      setSelectedCategories([]);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    // 3. Otherwise, create a new conversation
     const newSession = await createCloudSession("New Conversation", settings.persona);
     setSessions((prev) => [newSession, ...prev]);
     setActiveSessionId(newSession.id);
     setSelectedBooks([]);
     setSelectedCategories([]);
+    textareaRef.current?.focus();
     toast.success("Started a new conversation");
   };
 
