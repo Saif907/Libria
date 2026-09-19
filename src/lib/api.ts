@@ -65,7 +65,7 @@ export interface UploadBookPayload {
 
 const API_BASE = (
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL) ||
-  "http://127.0.0.1:8000"
+  "https://libria-backend-996542170705.us-central1.run.app"
 ).replace(/\/$/, "");
 
 /**
@@ -149,6 +149,7 @@ export interface ChatApiRequest {
   effort_tier?: "low" | "medium" | "high";
   active_book_id?: string | null;
   tagged_books?: string[] | null;
+  tagged_categories?: string[] | null;
   images?: string[] | null;
 }
 
@@ -178,6 +179,7 @@ export async function askLibriaApi(payload: ChatApiRequest): Promise<ChatApiResp
       effort_tier: payload.effort_tier || "low",
       active_book_id: payload.active_book_id || null,
       tagged_books: payload.tagged_books || null,
+      tagged_categories: payload.tagged_categories || null,
       images: payload.images || null,
     }),
   });
@@ -198,3 +200,56 @@ export async function askLibriaApi(payload: ChatApiRequest): Promise<ChatApiResp
   return response.json();
 }
 
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Direct Fast-Path Reading Explanation API Client
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+export interface ExplainPassagePayload {
+  passage?: string;
+  page_number?: number;
+  page_image?: string;
+  book_id?: string;
+  book_title?: string;
+  query?: string;
+}
+
+export interface ExplainPassageResponse {
+  explanation: string;
+  book_title?: string;
+  page_number?: number;
+  passage_snippet?: string;
+  latency_ms: number;
+}
+
+/**
+ * Fast-path direct explanation for highlighted excerpts and page snapshots.
+ * Bypasses agent retrieval overhead for sub-second responses.
+ */
+export async function explainPassageApi(
+  payload: ExplainPassagePayload
+): Promise<ExplainPassageResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/reading/explain`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    let errorDetail = `Explanation request failed (${response.status})`;
+    try {
+      const errJson = await response.json();
+      if (errJson.detail) {
+        errorDetail = typeof errJson.detail === "string" ? errJson.detail : JSON.stringify(errJson.detail);
+      }
+    } catch {
+      // Fallback error
+    }
+    throw new Error(errorDetail);
+  }
+
+  return response.json();
+}

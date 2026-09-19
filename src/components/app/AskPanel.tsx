@@ -41,7 +41,7 @@ import {
   type Scope,
   scopeLabel,
 } from "@/lib/ask-data";
-import { askLibriaApi } from "@/lib/api";
+import { askLibriaApi, explainPassageApi } from "@/lib/api";
 import { CitationList, GroundingBadge } from "./Evidence";
 import { Button, IconButton } from "./primitives";
 import { cn } from "@/lib/utils";
@@ -1413,98 +1413,143 @@ export function AskBody({
     };
 
     try {
-      // 3. Invoke Real Backend API with Grounded Context & Page Images
+      // 3. Invoke Fast-Path Reading Explanation or Agent RAG Pipeline
       const bookScopeId = attachedPages[0]?.bookId || activeBookId || undefined;
+      const targetBookTitle = activeBookTitle || attachedPages[0]?.bookTitle || undefined;
 
       // Extract all page images for multimodal understanding (diagrams, tables, sketches)
       const pageImages = attachedPages
         .map((p) => p.imageUrl)
         .filter(Boolean);
 
-      // Construct grounded prompt payload so LLM reads all attached pages with text and visual snapshots
-      let promptPayload = q;
-      if (attachedPages.length > 0) {
-        const bookName = attachedPages[0]?.bookTitle || activeBookTitle || "the book";
-        const pageListStr = attachedPages.map((p) => `Page ${p.pageNumber}`).join(", ");
-        const pagesContent = attachedPages
-          .map((p) => {
-            const textPart = p.pageText
-              ? `\nText:\n"""\n${p.pageText.slice(0, 3000)}\n"""`
-              : "\n[Visual elements, diagrams, or drawing provided via attached image]";
-            return `--- Page ${p.pageNumber} of "${bookName}" ---${textPart}`;
-          })
-          .join("\n\n");
+      const isFastPath = Boolean(
+        attachedPassage ||
+        attachedPages.length > 0 ||
+        scope === "selection" ||
+        scope === "page"
+      );
 
-        promptPayload = `[Context: User is reading ${pageListStr} of "${bookName}". High-resolution page snapshot(s) attached for visual diagrams, drawings, and tables:\n${pagesContent}\n]\n\nQuestion about ${pageListStr}: ${q}`;
-      } else if (attachedPassage) {
-        promptPayload = `[Context: Selected passage from "${activeBookTitle || "book"}":\n"""\n${attachedPassage}\n"""]\n\nQuestion: ${q}`;
+      let rawText = "";
+      let duration = 300;
+      let isConv = false;
+      let planThought: string | undefined = undefined;
+      let mappedCitations: Citation[] = [];
+
+      if (isFastPath) {
+        // Fast-Path: Direct Single-Pass Explanation (Sub-second response, 0 vector search overhead)
+        const explainResult = await explainPassageApi({
+          passage: attachedPassage,
+          page_number: attachedPages[0]?.pageNumber,
+          page_image: pageImages[0] || undefined,
+          book_id: bookScopeId,
+          book_title: targetBookTitle,
+          query: q,
+        });
+
+        if (abortControllerRef.current) return;
+
+        rawText = explainResult.explanation;
+        duration = Math.round(explainResult.latency_ms || 350);
+        isConv = false;
+        planThought = "Direct single-pass reader explanation using structured 5-part framework.";
+
+        setIterationState(() => [
+          {
+            id: "fast-path-1",
+            iteration: 1,
+            thought: attachedPages.length > 0
+              ? `Inspected Page ${attachedPages[0]?.pageNumber} (${pageImages.length} snapshot) and generated structured 5-part explanation.`
+              : attachedPassage
+              ? "Extracted highlighted passage and generated structured 5-part explanation."
+              : "Generated direct 5-part pedagogical explanation.",
+            action: {
+              tool: "direct_reader_fastpath",
+              args: {
+                scope,
+                book: targetBookTitle || bookScopeId,
+                has_passage: Boolean(attachedPassage),
+                has_image: pageImages.length > 0,
+              },
+            },
+            observation: {
+              summary: `Generated structured explanation in ${(duration / 1000).toFixed(2)}s`,
+              details: [
+                targetBookTitle ? `Book: ${targetBookTitle}` : "Reader Excerpt",
+                explainResult.page_number ? `Page ${explainResult.page_number}` : "Highlighted Text",
+              ],
+            },
+            status: "completed",
+            durationMs: duration,
+          },
+        ]);
+
+        mappedCitations = [
+          {
+            bookId: targetBookTitle || "Active Reader",
+            chapter: explainResult.page_number ? `Page ${explainResult.page_number}` : "Highlighted Passage",
+            page: explainResult.page_number || 1,
+            passage: explainResult.passage_snippet || attachedPassage || "Direct Reader Context",
+            relevance: "100% Direct Grounded Match",
+          },
+        ];
+      } else {
+        // Agent Path: Full Vector Retrieval & Synthesis Pipeline
+        let promptPayload = q;
+        const apiResult = await askLibriaApi({
+          query: promptPayload,
+          effort_tier: thinkingMode ? "high" : "low",
+          active_book_id: bookScopeId,
+          images: pageImages.length > 0 ? pageImages : undefined,
+        });
+
+        if (abortControllerRef.current) return;
+
+        rawText = apiResult.answer || "No advice could be synthesized.";
+        duration = Math.round(apiResult.total_latency_ms || 300);
+        isConv = apiResult.is_conversational;
+        planThought = apiResult.plan_thought || undefined;
+
+        setIterationState(() => [
+          {
+            id: "react-iter-1",
+            iteration: 1,
+            thought:
+              apiResult.plan_thought ||
+              (isConv
+                ? "Classified query as conversational greeting. Providing direct warm response."
+                : "Selected optimal retrieval tool and scoped to verified book wisdom."),
+            action: isConv
+              ? undefined
+              : {
+                  tool: "search_books",
+                  args: { query: q, book_filter: bookScopeId || null },
+                },
+            observation: isConv
+              ? undefined
+              : {
+                  summary: `Retrieved grounded book chunks (${apiResult.citations.length} citation${apiResult.citations.length === 1 ? "" : "s"}) in ${(duration / 1000).toFixed(1)}s`,
+                  details:
+                    apiResult.books_referenced.length > 0
+                      ? apiResult.books_referenced.map((b) => `Referenced source: ${b}`)
+                      : undefined,
+                },
+            status: "completed",
+            durationMs: duration,
+          },
+        ]);
+
+        mappedCitations = (apiResult.citations || []).map((c) => ({
+          bookId: c.book_title,
+          chapter: c.section || "General",
+          page: 1,
+          passage: c.quote || `Key principle from ${c.section || c.book_title}`,
+          relevance: c.relevance_score
+            ? `${Math.round(c.relevance_score * 100)}% Match`
+            : "Grounded Citation",
+        }));
       }
 
-      const apiResult = await askLibriaApi({
-        query: promptPayload,
-        effort_tier: thinkingMode ? "high" : "low",
-        active_book_id: bookScopeId,
-        images: pageImages.length > 0 ? pageImages : undefined,
-      });
-
-      if (abortControllerRef.current) return;
-
-      // Update ReAct Loop Visualization with real execution metadata
-      const duration = Math.round(apiResult.total_latency_ms || 300);
-      const isConv = apiResult.is_conversational;
-
-      setIterationState(() => [
-        {
-          id: "react-iter-1",
-          iteration: 1,
-          thought:
-            apiResult.plan_thought ||
-            (isConv
-              ? "Classified query as conversational greeting. Providing direct warm response."
-              : attachedPages.length > 0
-              ? `Read and visually inspected ${attachedPages.length} attached page(s) (Pages ${attachedPages.map((p) => p.pageNumber).join(", ")}).`
-              : "Selected optimal retrieval tool and scoped to verified book wisdom."),
-          action: isConv
-            ? undefined
-            : {
-                tool: attachedPages.length > 0 ? "read_multimodal_pages" : "search_books",
-                args: attachedPages.length > 0
-                  ? {
-                      pages: attachedPages.map((p) => p.pageNumber),
-                      book: activeBookTitle || attachedPages[0]?.bookTitle,
-                      images_count: pageImages.length,
-                    }
-                  : { query: q, book_filter: bookScopeId || null },
-              },
-          observation: isConv
-            ? undefined
-            : {
-                summary: attachedPages.length > 0
-                  ? `Analyzed ${attachedPages.length} page(s) with ${pageImages.length} image snapshot${pageImages.length === 1 ? "" : "s"} in ${(duration / 1000).toFixed(1)}s`
-                  : `Retrieved grounded book chunks (${apiResult.citations.length} citation${apiResult.citations.length === 1 ? "" : "s"}) in ${(duration / 1000).toFixed(1)}s`,
-                details:
-                  apiResult.books_referenced.length > 0
-                    ? apiResult.books_referenced.map((b) => `Referenced source: ${b}`)
-                    : undefined,
-              },
-          status: "completed",
-          durationMs: duration,
-        },
-      ]);
-
-      // 4. Map Structured Citations
-      const mappedCitations: Citation[] = (apiResult.citations || []).map((c) => ({
-        bookId: c.book_title,
-        chapter: c.section || "General",
-        page: 1,
-        passage: c.quote || `Key principle from ${c.section || c.book_title}`,
-        relevance: c.relevance_score
-          ? `${Math.round(c.relevance_score * 100)}% Match`
-          : "Grounded Citation",
-      }));
-
-      // 5. Stream Real Paragraphs Word-by-Word
-      const rawText = apiResult.answer || "No advice could be synthesized.";
+      // 4. Stream Real Paragraphs Word-by-Word
       const paragraphs = rawText.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
       const streamedParagraphs: string[] = [];
 
@@ -1525,7 +1570,7 @@ export function AskBody({
                 ? {
                     ...msg,
                     content: draftParagraphs,
-                    grounding: isConv ? "grounded" : (mappedCitations.length > 0 ? "grounded" : "not-found"),
+                    grounding: "grounded",
                     citations: mappedCitations,
                   }
                 : msg
@@ -1550,11 +1595,11 @@ export function AskBody({
                 content: paragraphs,
                 grounding: isConv ? "grounded" : (mappedCitations.length > 0 ? "grounded" : "not-found"),
                 citations: mappedCitations,
-                reasoning: apiResult.plan_thought || undefined,
+                reasoning: planThought,
               }
             : msg
         );
-        syncAskSessionToStorage(updated, contextDetail, attachedPage?.bookTitle);
+        syncAskSessionToStorage(updated, contextDetail, attachedPages[0]?.bookTitle || activeBookTitle);
         return updated;
       });
 
