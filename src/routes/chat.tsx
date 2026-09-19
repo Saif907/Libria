@@ -1,8 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { nanoid } from "nanoid";
 import { toast } from "sonner";
+import {
+  fetchCloudSessions,
+  fetchSessionMessages,
+  createCloudSession,
+  deleteCloudSession,
+  updateCloudSessionTitle,
+  persistTurnInBackground,
+  generateUuid,
+} from "@/lib/chat-service";
 import { AppShell } from "@/components/app/AppShell";
 import { Button, IconButton } from "@/components/app/primitives";
 import { AgentSettingsModal } from "@/components/app/AgentSettingsModal";
@@ -106,27 +114,7 @@ interface ChatSession {
   persona: AgentPersonaId;
 }
 
-const SESSIONS_STORAGE_KEY = "libria_chat_sessions_v1";
-
-function loadSavedSessions(): ChatSession[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(SESSIONS_STORAGE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
-function saveSessions(sessions: ChatSession[]): void {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(sessions));
-  } catch (err) {
-    console.error("Failed to save chat sessions", err);
-  }
-}
+// Local storage helpers deprecated in favor of Supabase cloud persistence in chat-service.ts
 
 /**
  * Safely parses and renders inline code (`text`), bold (**text**), and italic (*text*) markers
@@ -524,23 +512,46 @@ function ChatWorkspacePage() {
     staleTime: 5 * 60 * 1000,
   });
 
-  // Sessions State
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    const saved = loadSavedSessions();
-    if (saved.length > 0) return saved;
-    const initialSession: ChatSession = {
-      id: nanoid(),
-      title: "Self-Development & Habit Architecture",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      messages: [],
-      persona: settings.persona,
-    };
-    return [initialSession];
-  });
-
-  const [activeSessionId, setActiveSessionId] = useState<string>(() => sessions[0]?.id || "");
+  // Sessions State (Loaded from Cloud Supabase)
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [historyOpen, setHistoryOpen] = useState(false);
+
+  // Initial Cloud Load
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      const cloudSessions = await fetchCloudSessions();
+      if (!isMounted) return;
+
+      if (cloudSessions.length > 0) {
+        setSessions(cloudSessions);
+        setActiveSessionId(cloudSessions[0].id);
+
+        // Pre-fetch messages for the most recent conversation
+        const initialMsgs = await fetchSessionMessages(cloudSessions[0].id);
+        if (isMounted) {
+          setSessions((prev) =>
+            prev.map((s) => (s.id === cloudSessions[0].id ? { ...s, messages: initialMsgs } : s))
+          );
+        }
+      } else {
+        // Create initial default session if none exist in cloud
+        const initial = await createCloudSession(
+          "Self-Development & Habit Architecture",
+          settings.persona
+        );
+        if (isMounted) {
+          setSessions([initial]);
+          setActiveSessionId(initial.id);
+        }
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Active Session helper
   const activeSession = useMemo(
@@ -550,10 +561,15 @@ function ChatWorkspacePage() {
 
   const messages = activeSession?.messages || [];
 
-  // Save sessions to localStorage on changes
-  useEffect(() => {
-    if (sessions.length > 0) {
-      saveSessions(sessions);
+  // Smooth Session Switcher (Fetches messages on-demand with 0ms in-memory cache)
+  const handleSelectSession = useCallback(async (sessionId: string) => {
+    setActiveSessionId(sessionId);
+    const target = sessions.find((s) => s.id === sessionId);
+    if (target && target.messages.length === 0) {
+      const msgs = await fetchSessionMessages(sessionId);
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, messages: msgs } : s))
+      );
     }
   }, [sessions]);
 
@@ -613,15 +629,8 @@ function ChatWorkspacePage() {
   };
 
   // Session Actions
-  const handleNewChat = () => {
-    const newSession: ChatSession = {
-      id: nanoid(),
-      title: "New Conversation",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      messages: [],
-      persona: settings.persona,
-    };
+  const handleNewChat = async () => {
+    const newSession = await createCloudSession("New Conversation", settings.persona);
     setSessions((prev) => [newSession, ...prev]);
     setActiveSessionId(newSession.id);
     setSelectedBooks([]);
@@ -631,17 +640,20 @@ function ChatWorkspacePage() {
 
   const handleDeleteSession = (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    deleteCloudSession(sessionId).catch(() => {});
     setSessions((prev) => {
       const filtered = prev.filter((s) => s.id !== sessionId);
       if (filtered.length === 0) {
+        const freshId = generateUuid();
         const fresh: ChatSession = {
-          id: nanoid(),
+          id: freshId,
           title: "New Conversation",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           messages: [],
           persona: settings.persona,
         };
+        createCloudSession(fresh.title, fresh.persona).catch(() => {});
         setActiveSessionId(fresh.id);
         return [fresh];
       }
@@ -670,9 +682,9 @@ function ChatWorkspacePage() {
 
     const currentTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-    // 1. Append User Message
+    // 1. Append User Message (Optimistic UI update)
     const userMsg: ChatMessage = {
-      id: nanoid(),
+      id: generateUuid(),
       role: "user",
       content: q,
       timestamp: currentTime,
@@ -699,7 +711,7 @@ function ChatWorkspacePage() {
 
     setIsStreaming(true);
 
-    const assistantMsgId = nanoid();
+    const assistantMsgId = generateUuid();
 
     // Map tagged book titles for prompt synthesis
     const taggedBookTitles = selectedBooks
@@ -755,13 +767,25 @@ function ChatWorkspacePage() {
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
     try {
-      // 3. Invoke Real Backend API (Dynamic Effort Tier & Scoped Books)
+      // 3. Invoke Real Backend API (Dynamic Effort Tier, Scoped Books & Context Window)
       const bookScopeId = selectedBooks.length > 0 ? selectedBooks[0] : undefined;
+
+      // Extract prior conversation history based on user settings (0 to 30 turns)
+      const contextTurns = settings.contextWindowTurns ?? 10;
+      const historyTurns =
+        contextTurns > 0
+          ? messages.slice(-contextTurns).map((m) => ({
+              role: m.role,
+              content: Array.isArray(m.content) ? m.content.join("\n\n") : m.content,
+            }))
+          : [];
+
       const apiResult = await askLibriaApi({
         query: q,
         effort_tier: thinkingMode ? "high" : "low",
         active_book_id: bookScopeId,
         tagged_books: selectedBooks.length > 0 ? selectedBooks : null,
+        history: historyTurns.length > 0 ? historyTurns : null,
       });
 
       if (abortControllerRef.current) return;
@@ -866,6 +890,33 @@ function ChatWorkspacePage() {
           };
         })
       );
+
+      // 7. Non-blocking Background Cloud Persistence (Supabase messages + telemetry)
+      persistTurnInBackground({
+        sessionId: activeSession.id,
+        userMessage: {
+          id: userMsg.id,
+          content: q,
+          taggedBooks: selectedBooks,
+        },
+        assistantMessage: {
+          id: assistantMsgId,
+          content: paragraphs,
+          citations: mappedCitations,
+          booksReferenced: apiResult.books_referenced,
+        },
+        telemetry: {
+          executionId: apiResult.execution_id,
+          effortTier: thinkingMode ? "high" : "low",
+          latencyMs: apiResult.total_latency_ms,
+          planThought: apiResult.plan_thought,
+          toolCallsCount: apiResult.total_tool_calls,
+        },
+      });
+
+      if (isFirst) {
+        updateCloudSessionTitle(activeSession.id, updatedTitle);
+      }
     } catch (err: any) {
       toast.error(err?.message || "Failed to reach Libria AI backend");
       setSessions((prev) =>
@@ -1370,7 +1421,7 @@ function ChatWorkspacePage() {
                   <div
                     key={s.id}
                     onClick={() => {
-                      setActiveSessionId(s.id);
+                      handleSelectSession(s.id);
                       setHistoryOpen(false);
                     }}
                     className={cn(

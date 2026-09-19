@@ -144,6 +144,11 @@ export interface ChatApiCitation {
   relevance_score?: number;
 }
 
+export interface ChatHistoryTurn {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 export interface ChatApiRequest {
   query: string;
   effort_tier?: "low" | "medium" | "high";
@@ -151,6 +156,7 @@ export interface ChatApiRequest {
   tagged_books?: string[] | null;
   tagged_categories?: string[] | null;
   images?: string[] | null;
+  history?: ChatHistoryTurn[] | null;
 }
 
 export interface ChatApiResponse {
@@ -181,6 +187,7 @@ export async function askLibriaApi(payload: ChatApiRequest): Promise<ChatApiResp
       tagged_books: payload.tagged_books || null,
       tagged_categories: payload.tagged_categories || null,
       images: payload.images || null,
+      history: payload.history || null,
     }),
   });
 

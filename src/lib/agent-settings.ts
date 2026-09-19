@@ -62,6 +62,7 @@ export interface AgentSettings {
   accessNotes: boolean;
   deepThinkingDefault: boolean;
   webSearchDefault: boolean;
+  contextWindowTurns: number;
 }
 
 export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
@@ -76,6 +77,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   accessNotes: true,
   deepThinkingDefault: true,
   webSearchDefault: false,
+  contextWindowTurns: 10,
 };
 
 const STORAGE_KEY = "libria_agent_settings_v1";
@@ -89,6 +91,10 @@ export function loadAgentSettings(): AgentSettings {
     return {
       ...DEFAULT_AGENT_SETTINGS,
       ...parsed,
+      contextWindowTurns:
+        typeof parsed.contextWindowTurns === "number"
+          ? Math.max(0, Math.min(30, parsed.contextWindowTurns))
+          : 10,
       personalContext: {
         ...DEFAULT_AGENT_SETTINGS.personalContext,
         ...(parsed.personalContext || {}),

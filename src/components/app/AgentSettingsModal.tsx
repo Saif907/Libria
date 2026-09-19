@@ -21,6 +21,7 @@ import {
   Check,
   ShieldCheck,
   Zap,
+  History,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -343,6 +344,49 @@ export function AgentSettingsModal({ open, onOpenChange }: AgentSettingsModalPro
                       )}
                     />
                   </button>
+                </div>
+
+                {/* Conversational Memory Depth Slider (0 to 30 turns) */}
+                <div className="p-3.5 rounded-sm border border-border bg-surface/50 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <span className="text-xs font-medium text-foreground flex items-center gap-1.5">
+                        <History size={14} className="text-accent" />
+                        Conversational Memory Depth
+                      </span>
+                      <p className="text-2xs text-muted-foreground">
+                        Controls how many past messages are sent to the AI planner and synthesis engine (0–30 turns).
+                      </p>
+                    </div>
+                    <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded-xs bg-accent-soft text-accent border border-accent/30">
+                      {settings.contextWindowTurns === 0
+                        ? "0 (Stateless)"
+                        : `${settings.contextWindowTurns} turns`}
+                    </span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <input
+                      type="range"
+                      min="0"
+                      max="30"
+                      step="2"
+                      value={settings.contextWindowTurns}
+                      onChange={(e) =>
+                        updateSettings((prev) => ({
+                          ...prev,
+                          contextWindowTurns: parseInt(e.target.value, 10),
+                        }))
+                      }
+                      className="w-full h-1.5 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+                    />
+                    <div className="flex justify-between text-3xs text-faint font-mono">
+                      <span>0 (Stateless)</span>
+                      <span>10 (Standard)</span>
+                      <span>20 (Deep)</span>
+                      <span>30 (Maximum)</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
